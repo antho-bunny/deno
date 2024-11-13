@@ -1,9 +1,11 @@
 // Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
 
 mod fs_fetch_handler;
-mod proxy;
+pub mod proxy;
 #[cfg(test)]
 mod tests;
+
+pub mod resolver;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -67,6 +69,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::connect::HttpInfo;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioTimer;
+use resolver::CustomResolver;
 use serde::Deserialize;
 use serde::Serialize;
 use tower::ServiceExt;
@@ -981,7 +984,8 @@ pub fn create_http_client(
   tls_config.alpn_protocols = alpn_protocols;
   let tls_config = Arc::from(tls_config);
 
-  let mut http_connector = HttpConnector::new();
+  let mut http_connector =
+    HttpConnector::new_with_resolver(CustomResolver::new());
   http_connector.enforce_http(false);
 
   let user_agent = user_agent.parse::<HeaderValue>().map_err(|_| {
@@ -1050,13 +1054,14 @@ pub fn op_utf8_to_byte_string(#[string] input: String) -> ByteString {
 
 #[derive(Clone, Debug)]
 pub struct Client {
-  inner: Decompression<hyper_util::client::legacy::Client<Connector, ReqBody>>,
+  pub inner:
+    Decompression<hyper_util::client::legacy::Client<Connector, ReqBody>>,
   // Used to check whether to include a proxy-authorization header
-  proxies: Arc<proxy::Proxies>,
-  user_agent: HeaderValue,
+  pub proxies: Arc<proxy::Proxies>,
+  pub user_agent: HeaderValue,
 }
 
-type Connector = proxy::ProxyConnector<HttpConnector>;
+type Connector = proxy::ProxyConnector<HttpConnector<CustomResolver>>;
 
 // clippy is wrong here
 #[allow(clippy::declare_interior_mutable_const)]

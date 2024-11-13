@@ -31,25 +31,25 @@ use tokio_socks::tcp::Socks5Stream;
 use tower_service::Service;
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProxyConnector<C> {
-  pub(crate) http: C,
-  pub(crate) proxies: Arc<Proxies>,
+pub struct ProxyConnector<C> {
+  pub http: C,
+  pub proxies: Arc<Proxies>,
   /// TLS config when destination is not a proxy
-  pub(crate) tls: Arc<TlsConfig>,
+  pub tls: Arc<TlsConfig>,
   /// TLS config when destination is a proxy
   /// Notably, does not include ALPN
-  pub(crate) tls_proxy: Arc<TlsConfig>,
-  pub(crate) user_agent: Option<HeaderValue>,
+  pub tls_proxy: Arc<TlsConfig>,
+  pub user_agent: Option<HeaderValue>,
 }
 
 #[derive(Debug)]
-pub(crate) struct Proxies {
+pub struct Proxies {
   no: Option<NoProxy>,
   intercepts: Vec<Intercept>,
 }
 
 #[derive(Clone)]
-pub(crate) struct Intercept {
+pub struct Intercept {
   filter: Filter,
   target: Target,
 }
@@ -77,7 +77,7 @@ enum Filter {
   All,
 }
 
-pub(crate) fn from_env() -> Proxies {
+pub fn from_env() -> Proxies {
   let mut intercepts = Vec::new();
 
   if let Some(proxy) = parse_env_var("ALL_PROXY", Filter::All) {
@@ -133,7 +133,7 @@ fn parse_env_var(name: &str, filter: Filter) -> Option<Intercept> {
 }
 
 impl Intercept {
-  pub(crate) fn all(s: &str) -> Option<Self> {
+  pub fn all(s: &str) -> Option<Self> {
     let target = Target::parse(s)?;
     Some(Intercept {
       filter: Filter::All,
@@ -141,7 +141,7 @@ impl Intercept {
     })
   }
 
-  pub(crate) fn set_auth(&mut self, user: &str, pass: &str) {
+  pub fn set_auth(&mut self, user: &str, pass: &str) {
     match self.target {
       Target::Http { ref mut auth, .. } => {
         *auth = Some(basic_auth(user, Some(pass)));
@@ -379,11 +379,11 @@ impl<C> ProxyConnector<C> {
 }
 
 impl Proxies {
-  pub(crate) fn prepend(&mut self, intercept: Intercept) {
+  pub fn prepend(&mut self, intercept: Intercept) {
     self.intercepts.insert(0, intercept);
   }
 
-  pub(crate) fn http_forward_auth(&self, dst: &Uri) -> Option<&HeaderValue> {
+  pub fn http_forward_auth(&self, dst: &Uri) -> Option<&HeaderValue> {
     let intercept = self.intercept(dst)?;
     match intercept.target {
       // Only if the proxy target is http
@@ -415,7 +415,7 @@ impl Proxies {
 }
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 // These variatns are not to be inspected.
 pub enum Proxied<T> {
