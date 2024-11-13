@@ -2,9 +2,11 @@
 
 pub mod dns;
 mod fs_fetch_handler;
-mod proxy;
+pub mod proxy;
 #[cfg(test)]
 mod tests;
+
+pub mod resolver;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -79,6 +81,7 @@ use hyper_util::client::legacy::Builder as HyperClientBuilder;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioTimer;
 pub use proxy::basic_auth;
+use resolver::CustomResolver;
 use serde::Deserialize;
 use serde::Serialize;
 use tower::retry;
@@ -1020,7 +1023,7 @@ pub fn create_http_client(
   let tls_config = Arc::from(tls_config);
 
   let mut http_connector =
-    HttpConnector::new_with_resolver(options.dns_resolver.clone());
+    HttpConnector::new_with_resolver(CustomResolver::new());
   http_connector.enforce_http(false);
 
   let user_agent = user_agent.parse::<HeaderValue>().map_err(|_| {
@@ -1099,12 +1102,13 @@ pub struct Client {
       hyper_util::client::legacy::Client<Connector, ReqBody>,
     >,
   >,
+  // pub inner: Decompression<hyper_util::client::legacy::Client<Connector, ReqBody>>,
   // Used to check whether to include a proxy-authorization header
-  proxies: Arc<proxy::Proxies>,
-  user_agent: HeaderValue,
+  pub proxies: Arc<proxy::Proxies>,
+  pub user_agent: HeaderValue,
 }
 
-type Connector = proxy::ProxyConnector<HttpConnector<dns::Resolver>>;
+type Connector = proxy::ProxyConnector<HttpConnector<CustomResolver>>;
 
 // clippy is wrong here
 #[allow(clippy::declare_interior_mutable_const)]
