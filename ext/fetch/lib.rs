@@ -405,8 +405,7 @@ where
       .map_err(FetchError::Resource)?;
     (r.client.clone(), r.allow_host)
   } else {
-    // By default we allow the host fetch.
-    (get_or_create_client_from_state(state)?, true)
+    (get_or_create_client_from_state(state)?, false)
   };
 
   let method = Method::from_bytes(&method)?;
