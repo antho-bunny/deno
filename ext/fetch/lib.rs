@@ -277,8 +277,10 @@ pub fn get_or_create_client_from_state(
   state: &mut OpState,
 ) -> Result<Client, HttpClientCreateError> {
   if let Some(client) = state.try_borrow::<Client>() {
+    dbg!("here");
     Ok(client.clone())
   } else {
+    dbg!("not here");
     let options = state.borrow::<Options>();
     let client = create_client_from_options(options)?;
     state.put::<Client>(client.clone());
@@ -442,7 +444,8 @@ where
     let r = state.resource_table.get::<HttpClientResource>(rid)?;
     (r.client.clone(), r.allow_host)
   } else {
-    (get_or_create_client_from_state(state)?, false)
+    // By default we allow the host fetch.
+    (get_or_create_client_from_state(state)?, true)
   };
 
   let method = Method::from_bytes(&method)?;
