@@ -855,7 +855,7 @@ impl Resource for HttpClientResource {
 }
 
 impl HttpClientResource {
-  fn new(client: Client, allow_host: bool) -> Self {
+  pub fn new(client: Client, allow_host: bool) -> Self {
     Self { client, allow_host }
   }
 }
@@ -863,18 +863,18 @@ impl HttpClientResource {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateHttpClientArgs {
-  ca_certs: Vec<String>,
-  proxy: Option<Proxy>,
-  pool_max_idle_per_host: Option<usize>,
-  pool_idle_timeout: Option<serde_json::Value>,
+  pub ca_certs: Vec<String>,
+  pub proxy: Option<Proxy>,
+  pub pool_max_idle_per_host: Option<usize>,
+  pub pool_idle_timeout: Option<serde_json::Value>,
   #[serde(default)]
   use_hickory_resolver: bool,
   #[serde(default = "default_true")]
-  http1: bool,
+  pub http1: bool,
   #[serde(default = "default_true")]
-  http2: bool,
+  pub http2: bool,
   #[serde(default)]
-  allow_host: bool,
+  pub allow_host: bool,
 }
 
 fn default_true() -> bool {
