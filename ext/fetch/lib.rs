@@ -1096,7 +1096,7 @@ pub fn op_utf8_to_byte_string(#[string] input: String) -> ByteString {
 
 #[derive(Clone, Debug)]
 pub struct Client {
-  inner: Decompression<
+  pub inner: Decompression<
     retry::Retry<
       FetchRetry,
       hyper_util::client::legacy::Client<Connector, ReqBody>,
