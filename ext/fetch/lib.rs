@@ -1297,7 +1297,7 @@ fn op_fetch_promise_is_settled(promise: v8::Local<v8::Promise>) -> bool {
 
 /// Deno.fetch's retry policy.
 #[derive(Clone, Debug)]
-struct FetchRetry;
+pub struct FetchRetry;
 
 /// Marker extension that a request has been retried once.
 #[derive(Clone, Debug)]
