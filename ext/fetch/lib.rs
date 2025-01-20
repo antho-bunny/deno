@@ -868,7 +868,7 @@ pub struct CreateHttpClientArgs {
   pub pool_max_idle_per_host: Option<usize>,
   pub pool_idle_timeout: Option<serde_json::Value>,
   #[serde(default)]
-  use_hickory_resolver: bool,
+  pub use_hickory_resolver: bool,
   #[serde(default = "default_true")]
   pub http1: bool,
   #[serde(default = "default_true")]
