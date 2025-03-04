@@ -13,7 +13,6 @@ use std::rc::Rc;
 
 use boxed_error::Boxed;
 use deno_core::error::ResourceError;
-use deno_core::op2;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
 use deno_core::FastString;
@@ -21,6 +20,7 @@ use deno_core::JsBuffer;
 use deno_core::OpState;
 use deno_core::ResourceId;
 use deno_core::ToJsBuffer;
+use deno_core::{op2, OpDecl};
 use deno_error::JsErrorBox;
 use deno_io::fs::FileResource;
 use deno_io::fs::FsError;
@@ -1414,6 +1414,7 @@ where
   let str = fs
     .read_text_file_lossy_sync(&path, Some(&mut access_check))
     .map_err(|error| map_permission_error("readfile", error, &path))?;
+
   Ok(match str {
     Cow::Borrowed(text) => FastString::from_static(text),
     Cow::Owned(value) => value.into(),
