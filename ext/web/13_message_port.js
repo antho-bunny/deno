@@ -4,7 +4,7 @@
 /// <reference path="../../core/lib.deno_core.d.ts" />
 /// <reference path="../webidl/internal.d.ts" />
 /// <reference path="./internal.d.ts" />
-/// <reference path="./lib.deno_web.d.ts" />
+/// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 
 import { core, primordials } from "ext:core/mod.js";
 import {
@@ -20,11 +20,12 @@ const {
   ObjectPrototypeIsPrototypeOf,
   ObjectDefineProperty,
   Symbol,
-  SymbolFor,
-  SymbolIterator,
   PromiseResolve,
   SafeArrayIterator,
+  SymbolFor,
+  SymbolIterator,
   TypeError,
+  TypeErrorPrototype,
 } = primordials;
 const {
   InterruptedPrototype,
@@ -496,6 +497,19 @@ function structuredClone(value, options) {
     prefix,
     "Argument 2",
   );
+
+  // Fast-path, avoiding round-trip serialization and deserialization
+  if (options.transfer.length === 0) {
+    try {
+      return core.structuredClone(value);
+    } catch (e) {
+      if (ObjectPrototypeIsPrototypeOf(TypeErrorPrototype, e)) {
+        throw new DOMException(e.message, "DataCloneError");
+      }
+      throw e;
+    }
+  }
+
   const messageData = serializeJsMessageData(value, options.transfer);
   return deserializeJsMessageData(messageData)[0];
 }

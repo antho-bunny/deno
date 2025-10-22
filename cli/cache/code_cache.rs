@@ -1,7 +1,5 @@
 // Copyright 2018-2025 the Deno authors. MIT license.
 
-use std::sync::Arc;
-
 use deno_ast::ModuleSpecifier;
 use deno_core::error::AnyError;
 use deno_runtime::code_cache;
@@ -11,7 +9,6 @@ use super::cache_db::CacheDB;
 use super::cache_db::CacheDBConfiguration;
 use super::cache_db::CacheDBHash;
 use super::cache_db::CacheFailure;
-use crate::worker::CliCodeCache;
 
 pub static CODE_CACHE_DB: CacheDBConfiguration = CacheDBConfiguration {
   table_initializer: concat!(
@@ -82,12 +79,6 @@ impl CodeCache {
       CacheDBHash::new(source_hash),
       data,
     ));
-  }
-}
-
-impl CliCodeCache for CodeCache {
-  fn as_code_cache(self: Arc<Self>) -> Arc<dyn code_cache::CodeCache> {
-    self
   }
 }
 
@@ -187,14 +178,16 @@ mod test {
     let conn = CacheDB::in_memory(&CODE_CACHE_DB, "1.0.0");
     let cache = CodeCacheInner::new(conn);
 
-    assert!(cache
-      .get_sync(
-        "file:///foo/bar.js",
-        code_cache::CodeCacheType::EsModule,
-        CacheDBHash::new(1),
-      )
-      .unwrap()
-      .is_none());
+    assert!(
+      cache
+        .get_sync(
+          "file:///foo/bar.js",
+          code_cache::CodeCacheType::EsModule,
+          CacheDBHash::new(1),
+        )
+        .unwrap()
+        .is_none()
+    );
     let data_esm = vec![1, 2, 3];
     cache
       .set_sync(
@@ -216,14 +209,16 @@ mod test {
       data_esm
     );
 
-    assert!(cache
-      .get_sync(
-        "file:///foo/bar.js",
-        code_cache::CodeCacheType::Script,
-        CacheDBHash::new(1),
-      )
-      .unwrap()
-      .is_none());
+    assert!(
+      cache
+        .get_sync(
+          "file:///foo/bar.js",
+          code_cache::CodeCacheType::Script,
+          CacheDBHash::new(1),
+        )
+        .unwrap()
+        .is_none()
+    );
     let data_script = vec![4, 5, 6];
     cache
       .set_sync(

@@ -1128,3 +1128,63 @@ Deno.test(async function noWarningsFlag() {
 
   await timeout.promise;
 });
+
+Deno.test({
+  name: "[node/child_process] spawnSync supports input option",
+  fn() {
+    const text = "  console.log('hello')";
+    const expected = `console.log("hello");\n`;
+    {
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: text,
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+    {
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: Buffer.from(text),
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+    {
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: new TextEncoder().encode(text),
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+    {
+      const b = Buffer.from(text);
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: new DataView(b.buffer, b.byteOffset, b.byteLength),
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+
+    assertThrows(
+      () => {
+        spawnSync(Deno.execPath(), ["fmt", "-"], {
+          // deno-lint-ignore no-explicit-any
+          input: {} as any,
+        });
+      },
+      Error,
+      'The "input" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Object',
+    );
+  },
+});
+
+Deno.test(async function experimentalFlag() {
+  const code = ``;
+  const file = await Deno.makeTempFile();
+  await Deno.writeTextFile(file, code);
+  const timeout = withTimeout<void>();
+  const child = CP.fork(file, [], {
+    execArgv: ["--experimental-vm-modules"],
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
+  });
+  child.on("close", () => {
+    timeout.resolve();
+  });
+
+  await timeout.promise;
+});

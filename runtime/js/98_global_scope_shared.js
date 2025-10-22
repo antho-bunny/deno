@@ -33,12 +33,20 @@ import * as abortSignal from "ext:deno_web/03_abort_signal.js";
 import * as imageData from "ext:deno_web/16_image_data.js";
 import process from "node:process";
 import { Buffer } from "node:buffer";
-import { clearImmediate, setImmediate } from "node:timers";
+import {
+  clearImmediate,
+  clearInterval as nodeClearInterval,
+  clearTimeout as nodeClearTimeout,
+  setImmediate,
+  setInterval as nodeSetInterval,
+  setTimeout as nodeSetTimeout,
+} from "node:timers";
 import { loadWebGPU } from "ext:deno_webgpu/00_init.js";
 import * as webgpuSurface from "ext:deno_webgpu/02_surface.js";
 import { unstableIds } from "ext:runtime/90_deno_ns.js";
 
 const loadImage = core.createLazyLoader("ext:deno_canvas/01_image.js");
+const loadWebTransport = core.createLazyLoader("ext:deno_web/webtransport.js");
 
 // https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope
 const windowOrWorkerGlobalScope = {
@@ -141,6 +149,10 @@ const windowOrWorkerGlobalScope = {
   EventSource: core.propWritable(eventSource.EventSource),
   performance: core.propWritable(performance.performance),
   process: core.propWritable(process),
+  setImmediate: core.propWritable(setImmediate),
+  clearImmediate: core.propWritable(clearImmediate),
+  Buffer: core.propWritable(Buffer),
+  global: core.propWritable(globalThis),
   reportError: core.propWritable(event.reportError),
   setInterval: core.propWritable(timers.setInterval),
   setTimeout: core.propWritable(timers.setTimeout),
@@ -298,19 +310,43 @@ unstableForWindowOrWorkerGlobalScope[unstableIds.broadcastChannel] = {
 unstableForWindowOrWorkerGlobalScope[unstableIds.net] = {
   WebSocketStream: core.propNonEnumerable(webSocketStream.WebSocketStream),
   WebSocketError: core.propNonEnumerable(webSocketStream.WebSocketError),
+  WebTransport: core.propNonEnumerableLazyLoaded(
+    (wt) => wt.WebTransport,
+    loadWebTransport,
+  ),
+  WebTransportBidirectionalStream: core.propNonEnumerableLazyLoaded(
+    (wt) => wt.WebTransportBidirectionalStream,
+    loadWebTransport,
+  ),
+  WebTransportDatagramDuplexStream: core.propNonEnumerableLazyLoaded(
+    (wt) => wt.WebTransportDatagramDuplexStream,
+    loadWebTransport,
+  ),
+  WebTransportReceiveStream: core.propNonEnumerableLazyLoaded(
+    (wt) => wt.WebTransportReceiveStream,
+    loadWebTransport,
+  ),
+  WebTransportSendGroup: core.propNonEnumerableLazyLoaded(
+    (wt) => wt.WebTransportSendGroup,
+    loadWebTransport,
+  ),
+  WebTransportSendStream: core.propNonEnumerableLazyLoaded(
+    (wt) => wt.WebTransportSendStream,
+    loadWebTransport,
+  ),
+  WebTransportError: core.propNonEnumerableLazyLoaded(
+    (wt) => wt.WebTransportError,
+    loadWebTransport,
+  ),
 };
 
 unstableForWindowOrWorkerGlobalScope[unstableIds.webgpu] = {};
 
 unstableForWindowOrWorkerGlobalScope[unstableIds.nodeGlobals] = {
-  Buffer: core.propWritable(Buffer),
-  setImmediate: core.propWritable(setImmediate),
-  clearImmediate: core.propWritable(clearImmediate),
-  global: {
-    enumerable: true,
-    configurable: true,
-    get: () => globalThis,
-  },
+  clearInterval: core.propWritable(nodeClearInterval),
+  clearTimeout: core.propWritable(nodeClearTimeout),
+  setInterval: core.propWritable(nodeSetInterval),
+  setTimeout: core.propWritable(nodeSetTimeout),
 };
 
 export { unstableForWindowOrWorkerGlobalScope, windowOrWorkerGlobalScope };

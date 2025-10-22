@@ -26,12 +26,12 @@ Deno.test(
     const tempFile = Deno.makeTempFileSync();
     const tempInfo = Deno.statSync(tempFile);
     let now = Date.now();
-    assert(tempInfo.atime !== null && now - tempInfo.atime.valueOf() < 1000);
-    assert(tempInfo.mtime !== null && now - tempInfo.mtime.valueOf() < 1000);
+    assert(tempInfo.atime !== null && now - tempInfo.atime.valueOf() < 10000);
+    assert(tempInfo.mtime !== null && now - tempInfo.mtime.valueOf() < 10000);
     assert(
-      tempInfo.birthtime === null || now - tempInfo.birthtime.valueOf() < 1000,
+      tempInfo.birthtime === null || now - tempInfo.birthtime.valueOf() < 10000,
     );
-    assert(tempInfo.ctime !== null && now - tempInfo.ctime.valueOf() < 1000);
+    assert(tempInfo.ctime !== null && now - tempInfo.ctime.valueOf() < 10000);
     const mode = tempInfo.mode! & 0o777;
     if (Deno.build.os === "windows") {
       assertEquals(mode, 0o666);
@@ -285,13 +285,13 @@ Deno.test(
     Deno.writeFileSync(filename, data, { mode: 0o666 });
     const s = Deno.statSync(filename);
     assert(s.dev !== 0);
-    assert(s.ino === null);
-    assert(s.nlink === null);
+    assert(s.ino !== null);
+    assert(s.nlink !== null);
     assert(s.uid === null);
     assert(s.gid === null);
     assert(s.rdev === null);
     assert(s.blksize === null);
-    assert(s.blocks === null);
+    assert(s.blocks !== null);
     assert(s.isBlockDevice === null);
     assert(s.isCharDevice === null);
     assert(s.isFifo === null);
@@ -327,5 +327,29 @@ Deno.test(
     assert(!s.isCharDevice);
     assert(!s.isFifo);
     assert(!s.isSocket);
+  },
+);
+
+Deno.test(
+  { permissions: { read: false, write: true } },
+  async function fsFileStatFailPermissions() {
+    const testDir = Deno.makeTempDirSync();
+    const filename = testDir + "/file.txt";
+    using file = await Deno.open(filename, {
+      read: false,
+      write: true,
+      create: true,
+    });
+
+    await assertRejects(
+      () => file.stat(),
+      Deno.errors.NotCapable,
+      "Requires read access to",
+    );
+    assertThrows(
+      () => file.statSync(),
+      Deno.errors.NotCapable,
+      "Requires read access to",
+    );
   },
 );

@@ -3,12 +3,13 @@
 use deno_ast::diagnostics::Diagnostic;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
+use deno_lib::util::result::js_error_downcast_ref;
 use deno_lint::diagnostic::LintDiagnostic;
 use deno_runtime::colors;
+use deno_runtime::fmt_errors::format_js_error;
 use log::info;
 use serde::Serialize;
 
-use super::LintError;
 use crate::args::LintReporterKind;
 
 const JSON_SCHEMA_VERSION: u8 = 1;
@@ -53,7 +54,17 @@ impl LintReporter for PrettyLintReporter {
 
   fn visit_error(&mut self, file_path: &str, err: &AnyError) {
     log::error!("Error linting: {file_path}");
-    log::error!("   {err}");
+    let text = match js_error_downcast_ref(err) {
+      Some(js_error) => format_js_error(js_error),
+      None => format!("{err:#}"),
+    };
+    for line in text.split('\n') {
+      if line.is_empty() {
+        log::error!("");
+      } else {
+        log::error!("    {}", line);
+      }
+    }
   }
 
   fn close(&mut self, check_count: usize) {
@@ -170,6 +181,12 @@ struct JsonLintDiagnostic {
 }
 
 #[derive(Serialize)]
+struct LintError {
+  file_path: String,
+  message: String,
+}
+
+#[derive(Serialize)]
 struct JsonLintReporter {
   version: u8,
   diagnostics: Vec<JsonLintDiagnostic>,
@@ -216,7 +233,7 @@ impl LintReporter for JsonLintReporter {
       .to_file_path()
       .unwrap()
       .to_string_lossy()
-      .to_string();
+      .into_owned();
 
     if !self.checked_files.contains(&file_path) {
       self.checked_files.push(file_path);

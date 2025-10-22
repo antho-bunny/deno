@@ -4,13 +4,13 @@
 
 use std::path::PathBuf;
 
-use deno_core::op2;
 use deno_core::GarbageCollected;
 use deno_core::OpState;
+use deno_core::op2;
 pub use rusqlite;
-use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum WebStorageError {
@@ -51,10 +51,6 @@ deno_core::extension!(deno_webstorage,
     }
   },
 );
-
-pub fn get_declaration() -> PathBuf {
-  PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib.deno_webstorage.d.ts")
-}
 
 struct LocalStorage(Connection);
 struct SessionStorage(Connection);
@@ -124,7 +120,14 @@ struct Storage {
   persistent: bool,
 }
 
-impl GarbageCollected for Storage {}
+// SAFETY: we're sure this can be GCed
+unsafe impl GarbageCollected for Storage {
+  fn trace(&self, _visitor: &mut deno_core::v8::cppgc::Visitor) {}
+
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"Storage"
+  }
+}
 
 #[op2]
 impl Storage {

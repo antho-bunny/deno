@@ -6,6 +6,7 @@ import { core, primordials } from "ext:core/mod.js";
 const {
   isAnyArrayBuffer,
   isArrayBuffer,
+  internalRidSymbol,
 } = core;
 import {
   op_ws_check_permission_and_cancel_handle,
@@ -23,6 +24,7 @@ import {
 } from "ext:core/ops";
 const {
   ArrayBufferIsView,
+  ArrayIsArray,
   ArrayPrototypeJoin,
   ArrayPrototypeMap,
   ArrayPrototypePush,
@@ -44,6 +46,7 @@ const {
   SymbolFor,
   SymbolIterator,
   TypedArrayPrototypeGetByteLength,
+  TypeError,
 } = primordials;
 
 import { URL } from "ext:deno_url/00_url.js";
@@ -64,18 +67,43 @@ import {
 } from "ext:deno_web/02_event.js";
 import { Blob, BlobPrototype } from "ext:deno_web/09_file.js";
 import { getLocationHref } from "ext:deno_web/12_location.js";
+import {
+  fillHeaders,
+  headerListFromHeaders,
+  headersFromHeaderList,
+} from "ext:deno_fetch/20_headers.js";
+import { HttpClientPrototype } from "ext:deno_fetch/22_http_client.js";
 
-webidl.converters["sequence<DOMString> or DOMString"] = (
+webidl.converters["WebSocketInit"] = webidl.createDictionaryConverter(
+  "WebSocketInit",
+  [
+    {
+      key: "headers",
+      converter: webidl.converters["HeadersInit"],
+    },
+    {
+      key: "protocols",
+      converter: webidl.converters["sequence<DOMString>"],
+    },
+    { key: "client", converter: webidl.converters.any },
+  ],
+);
+
+webidl.converters["WebSocketInit or sequence<DOMString> or DOMString"] = (
   V,
   prefix,
   context,
   opts,
 ) => {
-  // Union for (sequence<DOMString> or DOMString)
+  // Union for (WebSocketInit or sequence<DOMString> or DOMString)
+  if (V === null || V === undefined) {
+    return webidl.converters["WebSocketInit"](V, prefix, context, opts);
+  }
   if (webidl.type(V) === "Object" && V !== null) {
     if (V[SymbolIterator] !== undefined) {
       return webidl.converters["sequence<DOMString>"](V, prefix, context, opts);
     }
+    return webidl.converters["WebSocketInit"](V, prefix, context, opts);
   }
   return webidl.converters.DOMString(V, prefix, context, opts);
 };
@@ -116,14 +144,14 @@ const _binaryType = Symbol("[[binaryType]]");
 const _eventLoop = Symbol("[[eventLoop]]");
 const _sendQueue = Symbol("[[sendQueue]]");
 const _queueSend = Symbol("[[queueSend]]");
+const _cancelHandle = Symbol("[[cancelHandle]]");
 
-const _server = Symbol("[[server]]");
 const _idleTimeoutDuration = Symbol("[[idleTimeout]]");
 const _idleTimeoutTimeout = Symbol("[[idleTimeoutTimeout]]");
 const _serverHandleIdleTimeout = Symbol("[[serverHandleIdleTimeout]]");
 
 class WebSocket extends EventTarget {
-  constructor(url, protocols = []) {
+  constructor(url, initOrProtocols) {
     super();
     this[webidl.brand] = webidl.brand;
     this[_rid] = undefined;
@@ -136,15 +164,17 @@ class WebSocket extends EventTarget {
     this[_idleTimeoutDuration] = 0;
     this[_idleTimeoutTimeout] = undefined;
     this[_sendQueue] = [];
+    this[_cancelHandle] = undefined;
 
     const prefix = "Failed to construct 'WebSocket'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     url = webidl.converters.USVString(url, prefix, "Argument 1");
-    protocols = webidl.converters["sequence<DOMString> or DOMString"](
-      protocols,
-      prefix,
-      "Argument 2",
-    );
+    initOrProtocols = webidl.converters
+      ["WebSocketInit or sequence<DOMString> or DOMString"](
+        initOrProtocols,
+        prefix,
+        "Argument 2",
+      );
 
     let wsURL;
 
@@ -177,14 +207,40 @@ class WebSocket extends EventTarget {
     this[_url] = wsURL.href;
     this[_role] = CLIENT;
 
-    op_ws_check_permission_and_cancel_handle(
-      "WebSocket.abort()",
-      this[_url],
-      false,
-    );
+    let protocols;
+    let headers = null;
+    let clientRid = null;
 
-    if (typeof protocols === "string") {
-      protocols = [protocols];
+    if (typeof initOrProtocols === "string") {
+      protocols = [initOrProtocols];
+    } else if (ArrayIsArray(initOrProtocols)) {
+      protocols = initOrProtocols;
+    } else {
+      protocols = initOrProtocols.protocols || [];
+
+      if (initOrProtocols.headers !== undefined) {
+        headers = headersFromHeaderList([], "request");
+        fillHeaders(headers, initOrProtocols.headers);
+      }
+
+      // NOTE: non standard extension. This handles Deno.HttpClient parameter
+      if (initOrProtocols.client !== undefined) {
+        if (
+          initOrProtocols.client !== null &&
+          !ObjectPrototypeIsPrototypeOf(
+            HttpClientPrototype,
+            initOrProtocols.client,
+          )
+        ) {
+          throw webidl.makeException(
+            TypeError,
+            "`client` must be a Deno.HttpClient",
+            prefix,
+            "Argument 2",
+          );
+        }
+        clientRid = initOrProtocols.client?.[internalRidSymbol] ?? null;
+      }
     }
 
     if (
@@ -196,7 +252,7 @@ class WebSocket extends EventTarget {
         )
     ) {
       throw new DOMException(
-        "Cannot supply multiple times the same protocol",
+        "Cannot supply the same protocol multiple times",
         "SyntaxError",
       );
     }
@@ -214,11 +270,22 @@ class WebSocket extends EventTarget {
       );
     }
 
+    const cancelRid = op_ws_check_permission_and_cancel_handle(
+      "WebSocket.abort()",
+      this[_url],
+      true,
+    );
+
+    this[_cancelHandle] = cancelRid;
+
     PromisePrototypeThen(
       op_ws_create(
         "new WebSocket()",
         wsURL.href,
         ArrayPrototypeJoin(protocols, ", "),
+        cancelRid,
+        headers ? headerListFromHeaders(headers) : null,
+        clientRid,
       ),
       (create) => {
         this[_rid] = create.rid;
@@ -255,6 +322,12 @@ class WebSocket extends EventTarget {
           { error: err, message: ErrorPrototypeToString(err) },
         );
         this.dispatchEvent(errorEv);
+
+        if (this[_cancelHandle]) {
+          core.tryClose(this[_cancelHandle]);
+
+          this[_cancelHandle] = undefined;
+        }
 
         const closeEv = new CloseEvent("close");
         this.dispatchEvent(closeEv);
@@ -375,7 +448,7 @@ class WebSocket extends EventTarget {
       reason = webidl.converters.USVString(reason, prefix, "Argument 2");
     }
 
-    if (!this[_server]) {
+    if (this[_role] === CLIENT) {
       if (
         code !== undefined &&
         !(code === 1000 || (3000 <= code && code < 5000))
@@ -395,6 +468,13 @@ class WebSocket extends EventTarget {
         "The close reason may not be longer than 123 bytes",
         "SyntaxError",
       );
+    }
+
+    if (this[_cancelHandle]) {
+      // Cancel ongoing handshake.
+      core.tryClose(this[_cancelHandle]);
+
+      this[_cancelHandle] = undefined;
     }
 
     if (this[_readyState] === CONNECTING) {
@@ -687,8 +767,8 @@ export {
   _readyState,
   _rid,
   _role,
-  _server,
   _serverHandleIdleTimeout,
+  CLIENT,
   createWebSocketBranded,
   SERVER,
   WebSocket,

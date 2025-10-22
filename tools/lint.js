@@ -13,6 +13,7 @@ import {
   ROOT_PATH,
   walk,
 } from "./util.js";
+import { assertEquals } from "@std/assert";
 import { checkCopyright } from "./copyright_checker.js";
 import * as ciFile from "../.github/workflows/ci.generate.ts";
 
@@ -27,13 +28,14 @@ if (!js && !rs) {
 
 if (rs) {
   promises.push(clippy());
+  promises.push(ensureNoNewITests());
+  promises.push(ensureNoNonPermissionCapitalLetterShortFlags());
 }
 
 if (js) {
   promises.push(dlint());
   promises.push(dlintPreferPrimordials());
   promises.push(ensureCiYmlUpToDate());
-  promises.push(ensureNoNewITests());
   promises.push(ensureNoUnusedOutFiles());
 
   if (rs) {
@@ -66,6 +68,7 @@ async function dlint() {
     ":!:cli/tsc/dts/**",
     ":!:cli/tsc/*typescript.js",
     ":!:cli/tsc/compiler.d.ts",
+    ":!:ext/node/polyfills/deps/**",
     ":!:runtime/examples/",
     ":!:target/",
     ":!:tests/ffi/tests/test.js",
@@ -121,6 +124,7 @@ async function dlintPreferPrimordials() {
     "ext/**/*.ts",
     ":!:ext/**/*.d.ts",
     "ext/node/polyfills/*.mjs",
+    ":!:ext/node/polyfills/deps/**",
   ]);
 
   if (!sourceFiles.length) {
@@ -182,6 +186,8 @@ async function clippy() {
       "clippy::print_stderr",
       "--deny",
       "clippy::print_stdout",
+      "--deny",
+      "clippy::large_futures",
     ],
     stdout: "inherit",
     stderr: "inherit",
@@ -216,7 +222,7 @@ async function ensureNoNewITests() {
     "coverage_tests.rs": 0,
     "eval_tests.rs": 0,
     "flags_tests.rs": 0,
-    "fmt_tests.rs": 16,
+    "fmt_tests.rs": 14,
     "init_tests.rs": 0,
     "inspector_tests.rs": 0,
     "install_tests.rs": 0,
@@ -231,7 +237,7 @@ async function ensureNoNewITests() {
     "pm_tests.rs": 0,
     "publish_tests.rs": 0,
     "repl_tests.rs": 0,
-    "run_tests.rs": 18,
+    "run_tests.rs": 17,
     "shared_library_tests.rs": 0,
     "task_tests.rs": 2,
     "test_tests.rs": 0,
@@ -262,6 +268,47 @@ async function ensureNoNewITests() {
   }
 }
 
+/**
+ * When short permission flags were being proposed, a concern that was raised was that
+ * it would degrade the permission system by making the flags obscure. To address this
+ * concern, we decided to make uppercase short flags ONLY relate to permissions. That
+ * way if someone specifies something like `-E`, the user can scrutinize the command
+ * a bit more than if it were `-e`. This custom lint rule attempts to try to maintain
+ * this convention.
+ */
+async function ensureNoNonPermissionCapitalLetterShortFlags() {
+  const text = await Deno.readTextFile(join(ROOT_PATH, "cli/args/flags.rs"));
+  const shortFlags = text.matchAll(/\.short\('([A-Z])'\)/g);
+  const values = Array.from(shortFlags.map((flag) => flag[1])).sort();
+  // DO NOT update this list with a non-permission short flag without
+  // discussion--there needs to be precedence to add to this list.
+  const expected = [
+    // --allow-all
+    "A",
+    // --dev flag for `deno install` (precedence: `npm install -D <package>`)
+    "D",
+    // --allow-env
+    "E",
+    // --allow-import
+    "I",
+    // log level (precedence: legacy)
+    "L",
+    // --allow-net
+    "N",
+    // --permission-set
+    "P",
+    // --allow-read
+    "R",
+    // --allow-sys
+    "S",
+    // version flag (precedence: legacy)
+    "V",
+    // --allow-write
+    "W",
+  ];
+  assertEquals(values, expected);
+}
+
 async function ensureNoUnusedOutFiles() {
   const specsDir = join(ROOT_PATH, "tests", "specs");
   const outFilePaths = new Set(
@@ -275,11 +322,37 @@ async function ensureNoUnusedOutFiles() {
     return entry.path.endsWith("__test__.jsonc");
   });
 
-  function checkObject(baseDirPath, obj) {
+  function checkObject(baseDirPath, obj, substsInit = {}) {
+    const substs = { ...substsInit };
+
+    if ("variants" in obj) {
+      for (const variantValue of Object.values(obj.variants)) {
+        for (const [substKey, substValue] of Object.entries(variantValue)) {
+          const subst = `\$\{${substKey}\}`;
+          if (subst in substs) {
+            substs[subst].push(substValue);
+          } else {
+            substs[subst] = [substValue];
+          }
+        }
+      }
+    }
     for (const [key, value] of Object.entries(obj)) {
       if (typeof value === "object") {
-        checkObject(baseDirPath, value);
+        checkObject(baseDirPath, value, substs);
       } else if (key === "output" && typeof value === "string") {
+        for (const [subst, substValues] of Object.entries(substs)) {
+          if (value.includes(subst)) {
+            for (const substValue of substValues) {
+              const substitutedValue = value.replaceAll(subst, substValue);
+              const substitutedOutFilePath = join(
+                baseDirPath,
+                substitutedValue,
+              );
+              outFilePaths.delete(substitutedOutFilePath);
+            }
+          }
+        }
         const outFilePath = join(baseDirPath, value);
         outFilePaths.delete(outFilePath);
       }

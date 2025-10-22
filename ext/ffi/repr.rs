@@ -1,13 +1,13 @@
 // Copyright 2018-2025 the Deno authors. MIT license.
 
+use std::ffi::CStr;
 use std::ffi::c_char;
 use std::ffi::c_void;
-use std::ffi::CStr;
 use std::ptr;
 
+use deno_core::OpState;
 use deno_core::op2;
 use deno_core::v8;
-use deno_core::OpState;
 
 use crate::FfiPermissions;
 
@@ -163,7 +163,7 @@ where
 
 #[op2(stack_trace)]
 pub fn op_ffi_get_buf<FP, 'scope>(
-  scope: &mut v8::HandleScope<'scope>,
+  scope: &mut v8::PinScope<'scope, '_>,
   state: &mut OpState,
   ptr: *mut c_void,
   #[number] offset: isize,
@@ -225,7 +225,7 @@ where
 
 #[op2(stack_trace)]
 pub fn op_ffi_cstr_read<FP, 'scope>(
-  scope: &mut v8::HandleScope<'scope>,
+  scope: &mut v8::PinScope<'scope, '_>,
   state: &mut OpState,
   ptr: *mut c_void,
   #[number] offset: isize,
@@ -243,6 +243,7 @@ where
   let cstr =
   // SAFETY: Pointer and offset are user provided.
     unsafe { CStr::from_ptr(ptr.offset(offset) as *const c_char) }.to_bytes();
+  #[allow(clippy::unnecessary_lazy_evaluations)]
   let value = v8::String::new_from_utf8(scope, cstr, v8::NewStringType::Normal)
     .ok_or_else(|| ReprError::CStringTooLong)?;
   Ok(value)

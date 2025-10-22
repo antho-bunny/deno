@@ -4,25 +4,27 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::path::Path;
 use std::rc::Rc;
 
-use deno_core::op2;
-use deno_core::v8;
 use deno_core::GarbageCollected;
 use deno_core::OpState;
 use deno_core::Resource;
+use deno_core::op2;
+use deno_core::v8;
 use deno_error::JsErrorBox;
 use deno_error::JsErrorClass;
+use denort_helper::DenoRtNativeAddonLoaderRc;
 use dlopen2::raw::Library;
 use serde::Deserialize;
 use serde_value::ValueDeserializer;
 
+use crate::FfiPermissions;
 use crate::ir::out_buffer_as_ptr;
 use crate::symbol::NativeType;
 use crate::symbol::Symbol;
 use crate::turbocall;
 use crate::turbocall::Turbocall;
-use crate::FfiPermissions;
 
 deno_error::js_error_wrapper!(dlopen2::Error, JsDlopen2Error, |err| {
   match err {
@@ -51,6 +53,9 @@ pub enum DlfcnError {
   Permission(#[from] deno_permissions::PermissionCheckError),
   #[class(inherit)]
   #[error(transparent)]
+  DenoRtLoad(#[from] denort_helper::LoadError),
+  #[class(inherit)]
+  #[error(transparent)]
   Other(#[from] JsErrorBox),
 }
 
@@ -60,7 +65,7 @@ pub struct DynamicLibraryResource {
 }
 
 impl Resource for DynamicLibraryResource {
-  fn name(&self) -> Cow<str> {
+  fn name(&self) -> Cow<'_, str> {
     "dynamicLibrary".into()
   }
 
@@ -125,43 +130,45 @@ impl<'de> Deserialize<'de> for ForeignSymbol {
     let value = serde_value::Value::deserialize(deserializer)?;
 
     // Probe a ForeignStatic and if that doesn't match, assume ForeignFunction to improve error messages
-    if let Ok(res) = ForeignStatic::deserialize(
-      ValueDeserializer::<D::Error>::new(value.clone()),
-    ) {
-      Ok(ForeignSymbol::ForeignStatic(res))
-    } else {
-      ForeignFunction::deserialize(ValueDeserializer::<D::Error>::new(value))
-        .map(ForeignSymbol::ForeignFunction)
+    match ForeignStatic::deserialize(ValueDeserializer::<D::Error>::new(
+      value.clone(),
+    )) {
+      Ok(res) => Ok(ForeignSymbol::ForeignStatic(res)),
+      _ => {
+        ForeignFunction::deserialize(ValueDeserializer::<D::Error>::new(value))
+          .map(ForeignSymbol::ForeignFunction)
+      }
     }
   }
 }
 
-#[derive(Deserialize, Debug)]
-pub struct FfiLoadArgs {
-  path: String,
-  symbols: HashMap<String, ForeignSymbol>,
-}
-
 #[op2(stack_trace)]
 pub fn op_ffi_load<'scope, FP>(
-  scope: &mut v8::HandleScope<'scope>,
+  scope: &mut v8::PinScope<'scope, '_>,
   state: Rc<RefCell<OpState>>,
-  #[serde] args: FfiLoadArgs,
+  #[string] path: &str,
+  #[serde] symbols: HashMap<String, ForeignSymbol>,
 ) -> Result<v8::Local<'scope, v8::Value>, DlfcnError>
 where
   FP: FfiPermissions + 'static,
 {
-  let path = {
+  let (path, denort_helper) = {
     let mut state = state.borrow_mut();
     let permissions = state.borrow_mut::<FP>();
-    permissions.check_partial_with_path(&args.path)?
+    (
+      permissions.check_partial_with_path(Cow::Borrowed(Path::new(path)))?,
+      state.try_borrow::<DenoRtNativeAddonLoaderRc>().cloned(),
+    )
   };
 
-  let lib = Library::open(&path).map_err(|e| {
-    dlopen2::Error::OpeningLibraryError(std::io::Error::new(
-      std::io::ErrorKind::Other,
-      format_error(e, &path),
-    ))
+  let real_path = match denort_helper {
+    Some(loader) => loader.load_and_resolve_path(&path)?,
+    None => Cow::Borrowed(path.as_ref()),
+  };
+  let lib = Library::open(real_path.as_ref()).map_err(|e| {
+    dlopen2::Error::OpeningLibraryError(std::io::Error::other(format_error(
+      e, &real_path,
+    )))
   })?;
   let mut resource = DynamicLibraryResource {
     lib,
@@ -169,7 +176,7 @@ where
   };
   let obj = v8::Object::new(scope);
 
-  for (symbol_key, foreign_symbol) in args.symbols {
+  for (symbol_key, foreign_symbol) in symbols {
     match foreign_symbol {
       ForeignSymbol::ForeignStatic(_) => {
         // No-op: Statics will be handled separately and are not part of the Rust-side resource.
@@ -212,6 +219,7 @@ where
 
         let func_key = v8::String::new(scope, &symbol_key).unwrap();
         let sym = Box::new(Symbol {
+          name: symbol_key.clone(),
           cif,
           ptr,
           parameter_types: foreign_fn.parameters,
@@ -241,27 +249,41 @@ where
   Ok(out.into())
 }
 
-struct FunctionData {
+pub struct FunctionData {
   // Held in a box to keep memory while function is alive.
   #[allow(unused)]
-  symbol: Box<Symbol>,
+  pub symbol: Box<Symbol>,
   // Held in a box to keep inner data alive while function is alive.
   #[allow(unused)]
   turbocall: Option<Turbocall>,
 }
 
-impl GarbageCollected for FunctionData {}
+// SAFETY: we're sure `FunctionData` can be GCed
+unsafe impl GarbageCollected for FunctionData {
+  fn trace(&self, _visitor: &mut deno_core::v8::cppgc::Visitor) {}
+
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"FunctionData"
+  }
+}
 
 // Create a JavaScript function for synchronous FFI call to
 // the given symbol.
 fn make_sync_fn<'s>(
-  scope: &mut v8::HandleScope<'s>,
+  scope: &mut v8::PinScope<'s, '_>,
   symbol: Box<Symbol>,
 ) -> v8::Local<'s, v8::Function> {
   let turbocall = if turbocall::is_compatible(&symbol) {
-    let trampoline = turbocall::compile_trampoline(&symbol);
-    let turbocall = turbocall::make_template(&symbol, trampoline);
-    Some(turbocall)
+    match turbocall::compile_trampoline(&symbol) {
+      Ok(trampoline) => {
+        let turbocall = turbocall::make_template(&symbol, trampoline);
+        Some(turbocall)
+      }
+      Err(e) => {
+        log::warn!("Failed to compile FFI turbocall: {e}");
+        None
+      }
+    }
   } else {
     None
   };
@@ -287,7 +309,7 @@ fn make_sync_fn<'s>(
 }
 
 fn sync_fn_impl<'s>(
-  scope: &mut v8::HandleScope<'s>,
+  scope: &mut v8::PinScope<'s, '_>,
   args: v8::FunctionCallbackArguments<'s>,
   mut rv: v8::ReturnValue,
 ) {
@@ -339,9 +361,9 @@ pub(crate) fn format_error(
       use winapi::shared::minwindef::DWORD;
       use winapi::shared::winerror::ERROR_INSUFFICIENT_BUFFER;
       use winapi::um::errhandlingapi::GetLastError;
-      use winapi::um::winbase::FormatMessageW;
       use winapi::um::winbase::FORMAT_MESSAGE_ARGUMENT_ARRAY;
       use winapi::um::winbase::FORMAT_MESSAGE_FROM_SYSTEM;
+      use winapi::um::winbase::FormatMessageW;
       use winapi::um::winnt::LANG_SYSTEM_DEFAULT;
       use winapi::um::winnt::MAKELANGID;
       use winapi::um::winnt::SUBLANG_SYS_DEFAULT;
