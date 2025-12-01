@@ -22,26 +22,31 @@ pub mod util;
 pub mod uv;
 
 use core::ptr::NonNull;
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 pub use std::ffi::CStr;
 pub use std::os::raw::c_char;
 pub use std::os::raw::c_void;
+use std::path::Path;
 use std::path::PathBuf;
 pub use std::ptr;
 use std::rc::Rc;
 use std::thread_local;
 
+use deno_core::ExternalOpsTracker;
+use deno_core::OpState;
+use deno_core::V8CrossThreadTaskSpawner;
 use deno_core::op2;
 use deno_core::parking_lot::RwLock;
 use deno_core::url::Url;
 // Expose common stuff for ease of use.
 // `use deno_napi::*`
 pub use deno_core::v8;
-use deno_core::ExternalOpsTracker;
-use deno_core::OpState;
-use deno_core::V8CrossThreadTaskSpawner;
 use deno_permissions::PermissionCheckError;
+pub use denort_helper::DenoRtNativeAddonLoader;
+pub use denort_helper::DenoRtNativeAddonLoaderRc;
 #[cfg(unix)]
 use libloading::os::unix::*;
 #[cfg(windows)]
@@ -56,6 +61,9 @@ pub enum NApiError {
   #[class(type)]
   #[error("Invalid path")]
   InvalidPath,
+  #[class(type)]
+  #[error(transparent)]
+  DenoRtLoad(#[from] denort_helper::LoadError),
   #[class(type)]
   #[error(transparent)]
   LibLoading(#[from] libloading::Error),
@@ -280,7 +288,7 @@ pub struct napi_extended_error_info {
   pub error_message: *const c_char,
   pub engine_reserved: *mut c_void,
   pub engine_error_code: i32,
-  pub error_code: napi_status,
+  pub error_code: Cell<napi_status>,
 }
 
 #[repr(C)]
@@ -316,7 +324,7 @@ impl Drop for NapiState {
         .env_cleanup_hooks
         .borrow()
         .iter()
-        .any(|pair| pair.0 == hook.0 && pair.1 == hook.1)
+        .any(|pair| std::ptr::fn_addr_eq(pair.0, hook.0) && pair.1 == hook.1)
       {
         continue;
       }
@@ -326,10 +334,9 @@ impl Drop for NapiState {
       }
 
       {
-        self
-          .env_cleanup_hooks
-          .borrow_mut()
-          .retain(|pair| !(pair.0 == hook.0 && pair.1 == hook.1));
+        self.env_cleanup_hooks.borrow_mut().retain(|pair| {
+          !(std::ptr::fn_addr_eq(pair.0, hook.0) && pair.1 == hook.1)
+        });
       }
     }
   }
@@ -375,7 +382,7 @@ impl EnvShared {
 #[repr(C)]
 pub struct Env {
   context: NonNull<v8::Context>,
-  pub isolate_ptr: *mut v8::Isolate,
+  pub isolate_ptr: v8::UnsafeRawIsolatePtr,
   pub open_handle_scopes: usize,
   pub shared: *mut EnvShared,
   pub async_work_sender: V8CrossThreadTaskSpawner,
@@ -384,7 +391,7 @@ pub struct Env {
   pub last_error: napi_extended_error_info,
   pub last_exception: Option<v8::Global<v8::Value>>,
   pub global: v8::Global<v8::Object>,
-  pub buffer_constructor: v8::Global<v8::Function>,
+  pub create_buffer: v8::Global<v8::Function>,
   pub report_error: v8::Global<v8::Function>,
 }
 
@@ -394,10 +401,10 @@ unsafe impl Sync for Env {}
 impl Env {
   #[allow(clippy::too_many_arguments)]
   pub fn new(
-    isolate_ptr: *mut v8::Isolate,
+    isolate_ptr: v8::UnsafeRawIsolatePtr,
     context: v8::Global<v8::Context>,
     global: v8::Global<v8::Object>,
-    buffer_constructor: v8::Global<v8::Function>,
+    create_buffer: v8::Global<v8::Function>,
     report_error: v8::Global<v8::Function>,
     sender: V8CrossThreadTaskSpawner,
     cleanup_hooks: Rc<RefCell<Vec<(napi_cleanup_hook, *mut c_void)>>>,
@@ -407,7 +414,7 @@ impl Env {
       isolate_ptr,
       context: context.into_raw(),
       global,
-      buffer_constructor,
+      create_buffer,
       report_error,
       shared: std::ptr::null_mut(),
       open_handle_scopes: 0,
@@ -418,7 +425,7 @@ impl Env {
         error_message: std::ptr::null(),
         engine_reserved: std::ptr::null_mut(),
         engine_error_code: 0,
-        error_code: napi_ok,
+        error_code: Cell::new(napi_ok),
       },
       last_exception: None,
     }
@@ -441,22 +448,19 @@ impl Env {
   #[inline]
   pub fn isolate(&mut self) -> &mut v8::Isolate {
     // SAFETY: Lifetime of `Isolate` is longer than `Env`.
-    unsafe { &mut *self.isolate_ptr }
+    unsafe {
+      v8::Isolate::ref_from_raw_isolate_ptr_mut_unchecked(&mut self.isolate_ptr)
+    }
   }
 
-  #[inline]
-  pub fn scope(&self) -> v8::CallbackScope {
-    // SAFETY: `v8::Local` is always non-null pointer; the `HandleScope` is
+  pub fn context<'s>(&'s self) -> v8::Local<'s, v8::Context> {
+    // SAFETY: `v8::Local` is always non-null pointer; the `PinScope<'_, '_>` is
     // already on the stack, but we don't have access to it.
-    let context = unsafe {
+    unsafe {
       std::mem::transmute::<NonNull<v8::Context>, v8::Local<v8::Context>>(
         self.context,
       )
-    };
-    // SAFETY: there must be a `HandleScope` on the stack, this is ensured because
-    // we are in a V8 callback or the module has already opened a `HandleScope`
-    // using `napi_open_handle_scope`.
-    unsafe { v8::CallbackScope::new(context) }
+    }
   }
 
   pub fn threadsafe_function_ref(&mut self) {
@@ -473,7 +477,10 @@ impl Env {
     data: *mut c_void,
   ) {
     let mut hooks = self.cleanup_hooks.borrow_mut();
-    if hooks.iter().any(|pair| pair.0 == hook && pair.1 == data) {
+    if hooks
+      .iter()
+      .any(|pair| std::ptr::fn_addr_eq(pair.0, hook) && pair.1 == data)
+    {
       panic!("Cannot register cleanup hook with same data twice");
     }
     hooks.push((hook, data));
@@ -487,7 +494,7 @@ impl Env {
     let mut hooks = self.cleanup_hooks.borrow_mut();
     match hooks
       .iter()
-      .rposition(|&pair| pair.0 == hook && pair.1 == data)
+      .rposition(|&pair| std::ptr::fn_addr_eq(pair.0, hook) && pair.1 == data)
     {
       Some(index) => {
         hooks.remove(index);
@@ -498,33 +505,25 @@ impl Env {
 }
 
 deno_core::extension!(deno_napi,
-  parameters = [P: NapiPermissions],
   ops = [
-    op_napi_open<P>
+    op_napi_open
   ],
-  state = |state| {
+  options = {
+    deno_rt_native_addon_loader: Option<DenoRtNativeAddonLoaderRc>,
+  },
+  state = |state, options| {
     state.put(NapiState {
       env_cleanup_hooks: Rc::new(RefCell::new(vec![])),
     });
+    if let Some(loader) = options.deno_rt_native_addon_loader {
+      state.put(loader);
+    }
   },
 );
 
-pub trait NapiPermissions {
-  #[must_use = "the resolved return value to mitigate time-of-check to time-of-use issues"]
-  fn check(&mut self, path: &str) -> Result<PathBuf, PermissionCheckError>;
-}
-
-// NOTE(bartlomieju): for now, NAPI uses `--allow-ffi` flag, but that might
-// change in the future.
-impl NapiPermissions for deno_permissions::PermissionsContainer {
-  #[inline(always)]
-  fn check(&mut self, path: &str) -> Result<PathBuf, PermissionCheckError> {
-    deno_permissions::PermissionsContainer::check_ffi(self, path)
-  }
-}
-
 unsafe impl Sync for NapiModuleHandle {}
 unsafe impl Send for NapiModuleHandle {}
+
 #[derive(Clone, Copy)]
 struct NapiModuleHandle(*const NapiModule);
 
@@ -533,29 +532,34 @@ static NAPI_LOADED_MODULES: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[op2(reentrant, stack_trace)]
-fn op_napi_open<NP, 'scope>(
-  scope: &mut v8::HandleScope<'scope>,
-  isolate: *mut v8::Isolate,
+fn op_napi_open<'scope>(
+  scope: &mut v8::PinScope<'scope, '_>,
+  isolate: &mut v8::Isolate,
   op_state: Rc<RefCell<OpState>>,
-  #[string] path: String,
+  #[string] path: &str,
   global: v8::Local<'scope, v8::Object>,
-  buffer_constructor: v8::Local<'scope, v8::Function>,
+  create_buffer: v8::Local<'scope, v8::Function>,
   report_error: v8::Local<'scope, v8::Function>,
-) -> Result<v8::Local<'scope, v8::Value>, NApiError>
-where
-  NP: NapiPermissions + 'static,
-{
+) -> Result<v8::Local<'scope, v8::Value>, NApiError> {
   // We must limit the OpState borrow because this function can trigger a
   // re-borrow through the NAPI module.
-  let (async_work_sender, cleanup_hooks, external_ops_tracker, path) = {
+  let (
+    async_work_sender,
+    cleanup_hooks,
+    external_ops_tracker,
+    deno_rt_native_addon_loader,
+    path,
+  ) = {
     let mut op_state = op_state.borrow_mut();
-    let permissions = op_state.borrow_mut::<NP>();
-    let path = permissions.check(&path)?;
+    let permissions =
+      op_state.borrow_mut::<deno_permissions::PermissionsContainer>();
+    let path = permissions.check_ffi(Cow::Borrowed(Path::new(path)))?;
     let napi_state = op_state.borrow::<NapiState>();
     (
       op_state.borrow::<V8CrossThreadTaskSpawner>().clone(),
       napi_state.env_cleanup_hooks.clone(),
       op_state.external_ops_tracker.clone(),
+      op_state.try_borrow::<DenoRtNativeAddonLoaderRc>().cloned(),
       path,
     )
   };
@@ -575,10 +579,10 @@ where
 
   let ctx = scope.get_current_context();
   let mut env = Env::new(
-    isolate,
+    unsafe { isolate.as_raw_isolate_ptr() },
     v8::Global::new(scope, ctx),
     v8::Global::new(scope, global),
-    v8::Global::new(scope, buffer_constructor),
+    v8::Global::new(scope, create_buffer),
     v8::Global::new(scope, report_error),
     async_work_sender,
     cleanup_hooks,
@@ -592,13 +596,18 @@ where
   #[cfg(not(unix))]
   let flags = 0x00000008;
 
+  let real_path = match deno_rt_native_addon_loader {
+    Some(loader) => loader.load_and_resolve_path(&path)?,
+    None => Cow::Borrowed(path.as_ref()),
+  };
+
   // SAFETY: opening a DLL calls dlopen
   #[cfg(unix)]
-  let library = unsafe { Library::open(Some(&path), flags) }?;
+  let library = unsafe { Library::open(Some(real_path.as_ref()), flags) }?;
 
   // SAFETY: opening a DLL calls dlopen
   #[cfg(not(unix))]
-  let library = unsafe { Library::load_with_flags(&path, flags) }?;
+  let library = unsafe { Library::load_with_flags(real_path.as_ref(), flags) }?;
 
   let maybe_module = MODULE_TO_REGISTER.with(|cell| {
     let mut slot = cell.borrow_mut();
@@ -609,16 +618,17 @@ where
   let exports = v8::Object::new(scope);
 
   let maybe_exports = if let Some(module_to_register) = maybe_module {
-    NAPI_LOADED_MODULES
-      .write()
-      .insert(path, NapiModuleHandle(module_to_register));
+    NAPI_LOADED_MODULES.write().insert(
+      real_path.to_path_buf(),
+      NapiModuleHandle(module_to_register),
+    );
     // SAFETY: napi_register_module guarantees that `module_to_register` is valid.
     let nm = unsafe { &*module_to_register };
     assert_eq!(nm.nm_version, 1);
     // SAFETY: we are going blind, calling the register function on the other side.
     unsafe { (nm.nm_register_func)(env_ptr, exports.into()) }
   } else if let Some(module_to_register) =
-    { NAPI_LOADED_MODULES.read().get(&path).copied() }
+    { NAPI_LOADED_MODULES.read().get(real_path.as_ref()).copied() }
   {
     // SAFETY: this originated from `napi_register_module`, so the
     // pointer should still be valid.
@@ -626,14 +636,19 @@ where
     assert_eq!(nm.nm_version, 1);
     // SAFETY: we are going blind, calling the register function on the other side.
     unsafe { (nm.nm_register_func)(env_ptr, exports.into()) }
-  } else if let Ok(init) = unsafe {
-    library.get::<napi_register_module_v1>(b"napi_register_module_v1")
-  } {
-    // Initializer callback.
-    // SAFETY: we are going blind, calling the register function on the other side.
-    unsafe { init(env_ptr, exports.into()) }
   } else {
-    return Err(NApiError::ModuleNotFound(path));
+    match unsafe {
+      library.get::<napi_register_module_v1>(b"napi_register_module_v1")
+    } {
+      Ok(init) => {
+        // Initializer callback.
+        // SAFETY: we are going blind, calling the register function on the other side.
+        unsafe { init(env_ptr, exports.into()) }
+      }
+      _ => {
+        return Err(NApiError::ModuleNotFound(path.into_owned()));
+      }
+    }
   };
 
   let exports = maybe_exports.unwrap_or(exports.into());

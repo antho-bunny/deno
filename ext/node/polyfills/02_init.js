@@ -5,7 +5,6 @@
 import { internals } from "ext:core/mod.js";
 const requireImpl = internals.requireImpl;
 
-import { nodeGlobals } from "ext:deno_node/00_globals.js";
 import "node:module";
 
 let initialized = false;
@@ -19,6 +18,7 @@ function initialize(args) {
     maybeWorkerMetadata,
     nodeDebug,
     warmup = false,
+    moduleSpecifier = null,
   } = args;
   if (!warmup) {
     if (initialized) {
@@ -41,6 +41,7 @@ function initialize(args) {
       runningOnMainThread,
       workerId,
       maybeWorkerMetadata,
+      moduleSpecifier,
     );
     internals.__setupChildProcessIpcChannel();
     // `Deno[Deno.internal].requireImpl` will be unreachable after this line.
@@ -72,16 +73,15 @@ internals.node = {
 };
 
 const nativeModuleExports = requireImpl.nativeModuleExports;
-nodeGlobals.Buffer = nativeModuleExports["buffer"].Buffer;
-nodeGlobals.clearImmediate = nativeModuleExports["timers"].clearImmediate;
-nodeGlobals.clearInterval = nativeModuleExports["timers"].clearInterval;
-nodeGlobals.clearTimeout = nativeModuleExports["timers"].clearTimeout;
-nodeGlobals.global = globalThis;
-nodeGlobals.process = nativeModuleExports["process"];
-nodeGlobals.setImmediate = nativeModuleExports["timers"].setImmediate;
-nodeGlobals.setInterval = nativeModuleExports["timers"].setInterval;
-nodeGlobals.setTimeout = nativeModuleExports["timers"].setTimeout;
-nodeGlobals.performance = nativeModuleExports["perf_hooks"].performance;
+globalThis.Buffer = nativeModuleExports["buffer"].Buffer;
+globalThis.clearImmediate = nativeModuleExports["timers"].clearImmediate;
+globalThis.clearInterval = nativeModuleExports["timers"].clearInterval;
+globalThis.clearTimeout = nativeModuleExports["timers"].clearTimeout;
+globalThis.global = globalThis;
+globalThis.process = nativeModuleExports["process"];
+globalThis.setImmediate = nativeModuleExports["timers"].setImmediate;
+globalThis.setInterval = nativeModuleExports["timers"].setInterval;
+globalThis.setTimeout = nativeModuleExports["timers"].setTimeout;
 
 nativeModuleExports["internal/console/constructor"].bindStreamsLazy(
   nativeModuleExports["console"],

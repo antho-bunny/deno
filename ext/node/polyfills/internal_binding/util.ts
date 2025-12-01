@@ -28,7 +28,11 @@
 // TODO(petamoriken): enable prefer-primordials for node polyfills
 // deno-lint-ignore-file prefer-primordials
 
-import { op_node_guess_handle_type } from "ext:core/ops";
+import {
+  op_node_get_own_non_index_properties,
+  op_node_guess_handle_type,
+  op_node_view_has_buffer,
+} from "ext:core/ops";
 
 const handleTypes = ["TCP", "TTY", "UDP", "FILE", "PIPE", "UNKNOWN"];
 export function guessHandleType(fd: number): string {
@@ -90,41 +94,15 @@ export function getOwnNonIndexProperties(
   obj: object,
   filter: number,
 ): (string | symbol)[] {
-  let allProperties = [
-    ...Object.getOwnPropertyNames(obj),
-    ...Object.getOwnPropertySymbols(obj),
-  ];
-
-  if (Array.isArray(obj)) {
-    allProperties = allProperties.filter((k) => !isArrayIndex(k));
-  }
-
-  if (filter === ALL_PROPERTIES) {
-    return allProperties;
-  }
-
-  const result: (string | symbol)[] = [];
-  for (const key of allProperties) {
-    const desc = Object.getOwnPropertyDescriptor(obj, key);
-    if (desc === undefined) {
-      continue;
-    }
-    if (filter & ONLY_WRITABLE && !desc.writable) {
-      continue;
-    }
-    if (filter & ONLY_ENUMERABLE && !desc.enumerable) {
-      continue;
-    }
-    if (filter & ONLY_CONFIGURABLE && !desc.configurable) {
-      continue;
-    }
-    if (filter & SKIP_STRINGS && typeof key === "string") {
-      continue;
-    }
-    if (filter & SKIP_SYMBOLS && typeof key === "symbol") {
-      continue;
-    }
-    result.push(key);
-  }
-  return result;
+  return op_node_get_own_non_index_properties(obj, filter);
 }
+
+export function arrayBufferViewHasBuffer(
+  view: ArrayBufferView,
+): boolean {
+  return op_node_view_has_buffer(view);
+}
+
+export const untransferableSymbol = Symbol.for(
+  "nodejs.worker_threads.untransferable",
+);

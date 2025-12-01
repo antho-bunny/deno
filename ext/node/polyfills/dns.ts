@@ -30,6 +30,7 @@ import {
   validateFunction,
   validateNumber,
   validateOneOf,
+  validatePort,
   validateString,
 } from "ext:deno_node/internal/validators.mjs";
 import { isIP } from "ext:deno_node/internal/net.ts";
@@ -80,37 +81,48 @@ import {
   dnsException,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
+  ERR_MISSING_ARGS,
+  handleDnsError,
 } from "ext:deno_node/internal/errors.ts";
 import {
   AI_ADDRCONFIG as ADDRCONFIG,
   AI_ALL as ALL,
   AI_V4MAPPED as V4MAPPED,
 } from "ext:deno_node/internal_binding/ares.ts";
-import {
-  ChannelWrapQuery,
-  getaddrinfo,
+import cares, {
+  type ChannelWrapQuery,
   GetAddrInfoReqWrap,
+  GetNameInfoReqWrap,
   QueryReqWrap,
 } from "ext:deno_node/internal_binding/cares_wrap.ts";
 import { domainToASCII } from "ext:deno_node/internal/idna.ts";
-import { notImplemented } from "ext:deno_node/_utils.ts";
+import { primordials } from "ext:core/mod.js";
+
+const { ObjectDefineProperty } = primordials;
 
 function onlookup(
   this: GetAddrInfoReqWrap,
   err: number | null,
   addresses: string[],
+  netPermToken: object | undefined,
 ) {
   if (err) {
     return this.callback(dnsException(err, "getaddrinfo", this.hostname));
   }
 
-  this.callback(null, addresses[0], this.family || isIP(addresses[0]));
+  this.callback(
+    null,
+    addresses[0],
+    this.family || isIP(addresses[0]),
+    netPermToken,
+  );
 }
 
 function onlookupall(
   this: GetAddrInfoReqWrap,
   err: number | null,
   addresses: string[],
+  netPermToken: object | undefined,
 ) {
   if (err) {
     return this.callback(dnsException(err, "getaddrinfo", this.hostname));
@@ -127,7 +139,11 @@ function onlookupall(
     };
   }
 
-  this.callback(null, parsedAddresses);
+  if (this.callback.length > 1) {
+    this.callback(null, parsedAddresses, undefined, netPermToken);
+  } else {
+    this.callback(null, parsedAddresses);
+  }
 }
 
 type LookupCallback = (
@@ -189,6 +205,7 @@ export function lookup(
   let family = 0;
   let all = false;
   let verbatim = getDefaultVerbatim();
+  let port = undefined;
 
   // Parse arguments
   if (hostname) {
@@ -230,6 +247,11 @@ export function lookup(
       validateBoolean(options.verbatim, "options.verbatim");
       verbatim = options.verbatim;
     }
+
+    if (options?.port != null) {
+      validateNumber(options.port, "options.port");
+      port = options.port;
+    }
   }
 
   if (!hostname) {
@@ -263,13 +285,14 @@ export function lookup(
   req.family = family;
   req.hostname = hostname;
   req.oncomplete = all ? onlookupall : onlookup;
+  req.port = port;
 
-  const err = getaddrinfo(
+  const err = cares.getaddrinfo(
     req,
     domainToASCII(hostname),
     family,
     hints,
-    verbatim,
+    verbatim ? cares.DNS_ORDER_VERBATIM : cares.DNS_ORDER_IPV4_FIRST,
   );
 
   if (err) {
@@ -286,6 +309,60 @@ export function lookup(
 
 Object.defineProperty(lookup, customPromisifyArgs, {
   value: ["address", "family"],
+  enumerable: false,
+});
+
+function onlookupservice(
+  this: GetNameInfoReqWrap,
+  err: Error | null,
+  hostname?: string,
+  service?: string,
+) {
+  if (err) {
+    return this.callback!(handleDnsError(err, "getnameinfo", this.address));
+  }
+
+  this.callback!(err, hostname, service);
+}
+
+export function lookupService(
+  address: string,
+  port: number,
+  callback: (
+    err: ErrnoException | null,
+    hostname?: string,
+    service?: string,
+  ) => void,
+): GetNameInfoReqWrap {
+  if (arguments.length !== 3) {
+    throw new ERR_MISSING_ARGS("address", "port", "callback");
+  }
+
+  if (isIP(address) === 0) {
+    throw new ERR_INVALID_ARG_VALUE("address", address);
+  }
+
+  port = validatePort(port);
+
+  validateFunction(callback, "callback");
+
+  const req = new GetNameInfoReqWrap();
+  req.callback = callback;
+  req.address = address;
+  req.port = port;
+  req.oncomplete = onlookupservice;
+
+  const errCode = cares.getnameinfo(req, address, port);
+  if (errCode) {
+    throw dnsException(errCode, "getnameinfo", address);
+  }
+
+  return req;
+}
+
+ObjectDefineProperty(lookupService, customPromisifyArgs, {
+  __proto__: null,
+  value: ["hostname", "service"],
   enumerable: false,
 });
 
@@ -331,11 +408,6 @@ function resolver(bindingName: keyof ChannelWrapQuery) {
     req.callback = callback as ResolveCallback;
     req.hostname = name;
     req.oncomplete = onresolve;
-
-    if (options && (options as ResolveOptions).ttl) {
-      notImplemented("dns.resolve* with ttl option");
-    }
-
     req.ttl = !!(options && (options as ResolveOptions).ttl);
 
     const err = this._handle[bindingName](req, domainToASCII(name));
@@ -975,6 +1047,7 @@ export default {
   ALL,
   V4MAPPED,
   lookup,
+  lookupService,
   getServers,
   resolveAny,
   resolve4,

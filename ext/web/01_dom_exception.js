@@ -5,7 +5,7 @@
 /// <reference path="../../core/lib.deno_core.d.ts" />
 /// <reference path="../webidl/internal.d.ts" />
 /// <reference path="../web/internal.d.ts" />
-/// <reference path="../web/lib.deno_web.d.ts" />
+/// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 
 import { primordials } from "ext:core/mod.js";
 const {
@@ -23,7 +23,7 @@ const {
 } = primordials;
 
 import * as webidl from "ext:deno_webidl/00_webidl.js";
-import { createFilteredInspectProxy } from "ext:deno_console/01_console.js";
+import { createFilteredInspectProxy } from "./01_console.js";
 
 const _name = Symbol("name");
 const _message = Symbol("message");

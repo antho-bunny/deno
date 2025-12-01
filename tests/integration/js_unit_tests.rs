@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use test_util as util;
+use test_util::TestContextBuilder;
 
 util::unit_test_factory!(
   js_unit_test,
@@ -17,6 +18,7 @@ util::unit_test_factory!(
     body_test,
     broadcast_channel_test,
     build_test,
+    bundle_test,
     cache_api_test,
     chmod_test,
     chown_test,
@@ -117,8 +119,18 @@ util::unit_test_factory!(
 
 fn js_unit_test(test: String) {
   let _g = util::http_server();
+  let context = TestContextBuilder::new()
+    .add_npm_env_vars()
+    .use_http_server()
+    .build();
 
-  let mut deno = util::deno_cmd()
+  let mut deno = if test == "bundle_test" {
+    context.new_command()
+  } else {
+    util::deno_cmd()
+  };
+
+  deno = deno
     .current_dir(util::root_path())
     .arg("test")
     .arg("--config")
@@ -128,11 +140,12 @@ fn js_unit_test(test: String) {
     // flag to particular files, but there's many of them that rely on unstable
     // net APIs (`reusePort` in `listen` and `listenTls`; `listenDatagram`)
     .arg("--unstable-net")
+    .arg("--unstable-vsock")
     .arg("--location=http://127.0.0.1:4545/")
     .arg("--no-prompt");
 
-  if test == "broadcast_channel_test" {
-    deno = deno.arg("--unstable-broadcast-channel");
+  if test == "bundle_test" {
+    deno = deno.arg("--unstable-bundle");
   }
 
   if test == "cron_test" {
@@ -165,10 +178,14 @@ fn js_unit_test(test: String) {
 
   let mut deno = deno
     .arg("-A")
-    .arg(util::tests_path().join("unit").join(format!("{test}.ts")))
-    .piped_output()
-    .spawn()
-    .expect("failed to spawn script");
+    .arg(util::tests_path().join("unit").join(format!("{test}.ts")));
+
+  // update the snapshots if when `UPDATE=1`
+  if std::env::var_os("UPDATE") == Some("1".into()) {
+    deno = deno.arg("--").arg("--update");
+  }
+
+  let mut deno = deno.piped_output().spawn().expect("failed to spawn script");
 
   let now = Instant::now();
   let stdout = deno.stdout.take().unwrap();

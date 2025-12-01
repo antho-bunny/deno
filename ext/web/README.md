@@ -98,8 +98,8 @@ Object.defineProperty(globalThis, "AbortController", {
 | structuredClone                  | messagePort.structuredClone              | true       | true         | true      |
 
 Then from rust, provide:
-`deno_web::deno_web::init_ops_and_esm::<Permissions>(Arc<BlobStore>, Option<Url>)`
-in the `extensions` field of your `RuntimeOptions`
+`deno_web::deno_web::init::<Permissions>(Arc<BlobStore>, Option<Url>)` in the
+`extensions` field of your `RuntimeOptions`
 
 Where:
 
@@ -110,8 +110,6 @@ Where:
 ## Dependencies
 
 - **deno_webidl**: Provided by the `deno_webidl` crate
-- **deno_console**: Provided by the `deno_console` crate
-- **deno_url**: Provided by the `deno_url` crate
 
 ## Provided ops
 

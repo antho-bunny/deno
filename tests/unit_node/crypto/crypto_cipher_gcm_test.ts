@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
 import testVectors128 from "./gcmEncryptExtIV128.json" with { type: "json" };
 import testVectors256 from "./gcmEncryptExtIV256.json" with { type: "json" };
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 
 const aesGcm = (bits: string, key: Uint8Array) => {
   const ALGO = bits == "128" ? `aes-128-gcm` : `aes-256-gcm`;
@@ -17,9 +17,10 @@ const aesGcm = (bits: string, key: Uint8Array) => {
   ): [string, Buffer] => {
     const cipher = crypto.createCipheriv(ALGO, key, iv);
     cipher.setAAD(aad);
-    let enc = cipher.update(str, "base64", "base64");
-    enc += cipher.final("base64");
-    return [enc, cipher.getAuthTag()];
+    let encBuf = cipher.update(str, "base64");
+    const finalBuf = cipher.final();
+    encBuf = Buffer.concat([encBuf, finalBuf]);
+    return [encBuf.toString("base64"), cipher.getAuthTag()];
   };
 
   const decrypt = (
@@ -31,10 +32,11 @@ const aesGcm = (bits: string, key: Uint8Array) => {
     const decipher = crypto.createDecipheriv(ALGO, key, iv);
     decipher.setAuthTag(authTag);
     decipher.setAAD(aad);
-    let str = decipher.update(enc, "base64", "base64");
-    str += decipher.final("base64");
+    let buf = decipher.update(enc, "base64");
+    const finalBuf = decipher.final();
+    buf = Buffer.concat([buf, finalBuf]);
 
-    return str;
+    return buf.toString("base64");
   };
 
   return {
@@ -123,7 +125,7 @@ Deno.test({
 // Issue #27441
 // https://github.com/denoland/deno/issues/27441
 Deno.test({
-  name: "aes-256-gcm supports IV of non standard length",
+  name: "aes-256-gcm supports IV of non standard length and auth tag check",
   fn() {
     const decipher = crypto.createDecipheriv(
       "aes-256-gcm",
@@ -136,6 +138,39 @@ Deno.test({
       "utf-8",
     );
     assertEquals(decrypted, "this is a secret");
-    decipher.final();
+    assertThrows(
+      () => decipher.final(),
+      TypeError,
+      "Failed to authenticate data",
+    );
+  },
+});
+
+Deno.test({
+  name: "aes gcm with invalid key length",
+  fn() {
+    assertThrows(
+      () => {
+        crypto.createCipheriv(
+          "aes-128-gcm",
+          Buffer.alloc(15),
+          Buffer.alloc(12),
+        );
+      },
+      Error,
+      "Invalid key length",
+    );
+
+    assertThrows(
+      () => {
+        crypto.createCipheriv(
+          "aes-256-gcm",
+          Buffer.alloc(31),
+          Buffer.alloc(12),
+        );
+      },
+      Error,
+      "Invalid key length",
+    );
   },
 });

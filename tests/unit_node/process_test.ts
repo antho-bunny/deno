@@ -6,12 +6,20 @@ import process, {
   arch as importedArch,
   argv,
   argv0 as importedArgv0,
+  cpuUsage as importedCpuUsage,
   env,
   execArgv as importedExecArgv,
   execPath as importedExecPath,
+  getegid,
   geteuid,
+  getgid,
+  getuid,
   pid as importedPid,
   platform as importedPlatform,
+  setegid,
+  seteuid,
+  setgid,
+  setuid,
 } from "node:process";
 
 import { Readable } from "node:stream";
@@ -20,6 +28,7 @@ import {
   assert,
   assertEquals,
   assertFalse,
+  assertMatch,
   assertObjectMatch,
   assertStrictEquals,
   assertThrows,
@@ -28,8 +37,22 @@ import {
 import { stripAnsiCode } from "@std/fmt/colors";
 import * as path from "@std/path";
 import { delay } from "@std/async/delay";
+import { stub } from "@std/testing/mock";
+import { execSync } from "node:child_process";
 
 const testDir = new URL(".", import.meta.url);
+
+function getGroupNameFromSystem(gid: number): string {
+  const stdout = execSync(`grep ":${gid}:" /etc/group`).toString();
+  const groupInfo = stdout.trim().split(":")[0];
+  return groupInfo;
+}
+
+function getUserNameFromSystem(uid: number): string {
+  const stdout = execSync(`id -un ${uid}`).toString();
+  const name = stdout.trim();
+  return name;
+}
 
 Deno.test({
   name: "process.cwd and process.chdir success",
@@ -247,9 +270,7 @@ Deno.test(
 
     // kill with signal 0 should keep the process alive in linux (true means no error happened)
     // windows ignore signals
-    if (Deno.build.os !== "windows") {
-      assertEquals(process.kill(p.pid, 0), true);
-    }
+    assertEquals(process.kill(p.pid, 0), true);
     process.kill(p.pid);
     await p.status;
   },
@@ -390,6 +411,8 @@ Deno.test({
 Deno.test({
   name: "process.env",
   fn() {
+    assert(Object.prototype.hasOwnProperty.call(process, "env"));
+
     Deno.env.set("HELLO", "WORLD");
 
     assertObjectMatch(process.env, Deno.env.toObject());
@@ -411,6 +434,14 @@ Deno.test({
       ),
     );
 
+    Object.defineProperty(process.env, "HELLO", {
+      value: "OTHER_WORLD",
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
+    assertEquals(process.env.HELLO, "OTHER_WORLD");
+
     // deno-lint-ignore no-prototype-builtins
     assert(process.env.hasOwnProperty("HELLO"));
     assert("HELLO" in process.env);
@@ -430,15 +461,30 @@ Deno.test({
   },
 });
 
+// #30701
+Deno.test({
+  name: "process.env handles falsy values correctly",
+  fn() {
+    const key = "TEST_ENV_VAR_EMPTY_STRING";
+    Deno.env.set(key, "");
+
+    assertEquals(process.env[key], "");
+    assertEquals(Object.keys(process.env).includes(key), true);
+    assert(key in process.env);
+    assert(Object.hasOwn(process.env, key));
+  },
+});
+
 Deno.test({
   name: "process.env requires scoped env permission",
   permissions: { env: ["FOO"] },
   fn() {
     Deno.env.set("FOO", "1");
     assert("FOO" in process.env);
-    assertFalse("BAR" in process.env);
+    assertThrows(() => {
+      process.env.BAR;
+    }, Deno.errors.NotCapable);
     assert(Object.hasOwn(process.env, "FOO"));
-    assertFalse(Object.hasOwn(process.env, "BAR"));
   },
 });
 
@@ -454,6 +500,42 @@ Deno.test({
     assertFalse("" in process.env);
     assertFalse("\0" in process.env);
     assertFalse("=c:" in process.env);
+  },
+});
+
+Deno.test({
+  "name": "process.env: checking symbol in env should not require permission",
+  permissions: "none",
+  fn() {
+    const symbol = Symbol.for("67");
+    Reflect.has(globalThis.process.env, symbol);
+  },
+});
+
+Deno.test({
+  // NB(Tango992): Node.js does not support using symbols as env keys,
+  // thus this test should be omitted once we align with Node.js behavior.
+  name: "process.env: setting and getting a symbol key",
+  fn() {
+    const symbol = Symbol.for("foo");
+    // @ts-expect-error setting a symbol key
+    process.env[symbol] = "foo";
+    // @ts-expect-error getting a symbol key
+    assertEquals(process.env[symbol], "foo");
+    assert(Reflect.has(process.env, symbol));
+
+    // @ts-expect-error deleting a symbol key
+    delete process.env[symbol];
+    assertFalse(Reflect.has(process.env, symbol));
+
+    Object.defineProperty(process.env, symbol, {
+      value: "bar",
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
+    // @ts-expect-error getting a symbol key
+    assertEquals(process.env[symbol], "bar");
   },
 });
 
@@ -529,7 +611,13 @@ Deno.test({
 Deno.test({
   name: "process.stdin readable with piping a stream",
   async fn() {
-    const expected = ["16384", "foo", "bar", "null", "end"];
+    const expected = [
+      Deno.build.os == "windows" ? "16384" : "65536",
+      "foo",
+      "bar",
+      "null",
+      "end",
+    ];
     const scriptPath = "./testdata/process_stdin.ts";
 
     const command = new Deno.Command(Deno.execPath(), {
@@ -557,7 +645,7 @@ Deno.test({
   name: "process.stdin readable with piping a socket",
   ignore: Deno.build.os === "windows",
   async fn() {
-    const expected = ["16384", "foo", "bar", "null", "end"];
+    const expected = ["65536", "foo", "bar", "null", "end"];
     const scriptPath = "./testdata/process_stdin.ts";
 
     const listener = Deno.listen({ hostname: "127.0.0.1", port: 9000 });
@@ -614,7 +702,7 @@ Deno.test({
   // // TODO(PolarETech): Prepare a similar test that can be run on Windows
   // ignore: Deno.build.os === "windows",
   async fn() {
-    const expected = ["16384", "null", "end"];
+    const expected = ["65536", "null", "end"];
     const scriptPath = "./testdata/process_stdin.ts";
     const directoryPath = "./testdata/";
 
@@ -647,6 +735,7 @@ Deno.test({
     const consoleSize = isTTY ? Deno.consoleSize() : undefined;
     assertEquals(process.stdout.columns, consoleSize?.columns);
     assertEquals(process.stdout.rows, consoleSize?.rows);
+    assert([1, 4, 8, 24].includes(process.stdout.getColorDepth()));
     assertEquals(
       `${process.stdout.getWindowSize()}`,
       `${consoleSize && [consoleSize.columns, consoleSize.rows]}`,
@@ -934,6 +1023,28 @@ Deno.test({
 });
 
 Deno.test({
+  name: "process._rawDebug",
+  async fn() {
+    const command = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--quiet",
+        "./testdata/process_raw_debug.ts",
+      ],
+      cwd: testDir,
+    });
+    const { stdout, stderr } = await command.output();
+
+    assertEquals(stdout.length, 0);
+    const decoder = new TextDecoder();
+    assertEquals(
+      stripAnsiCode(decoder.decode(stderr).trim()),
+      "this should go to stderr { a: 1, b: [ 'a', 2 ] }",
+    );
+  },
+});
+
+Deno.test({
   name: "process.stdout isn't closed when source stream ended",
   async fn() {
     const source = Readable.from(["foo", "bar"]);
@@ -1096,6 +1207,14 @@ Deno.test({
   },
 });
 
+Deno.test({
+  name: "process.sourceMapsEnabled",
+  fn() {
+    // @ts-ignore: not available in the types yet.
+    assertEquals(process.sourceMapsEnabled, true);
+  },
+});
+
 // Regression test for https://github.com/denoland/deno/issues/23761
 Deno.test({
   name: "process.uptime without this",
@@ -1143,9 +1262,56 @@ Deno.test(function importedExecPathTest() {
 });
 
 Deno.test("process.cpuUsage()", () => {
+  assert(process.cpuUsage.length === 1);
   const cpuUsage = process.cpuUsage();
   assert(typeof cpuUsage.user === "number");
   assert(typeof cpuUsage.system === "number");
+  const a = process.cpuUsage();
+  const b = process.cpuUsage(a);
+  assert(a.user > b.user);
+  assert(a.system > b.system);
+
+  assertThrows(
+    () => {
+      // @ts-ignore TS2322
+      process.cpuUsage({});
+    },
+    TypeError,
+  );
+
+  assertThrows(
+    () => {
+      // @ts-ignore TS2322
+      process.cpuUsage({ user: "1", system: 2 });
+    },
+    TypeError,
+  );
+  assertThrows(
+    () => {
+      // @ts-ignore TS2322
+      process.cpuUsage({ user: 1, system: "2" });
+    },
+    TypeError,
+  );
+
+  for (const invalidNumber of [-1, -Infinity, Infinity, NaN]) {
+    assertThrows(
+      () => {
+        process.cpuUsage({ user: invalidNumber, system: 2 });
+      },
+      RangeError,
+    );
+    assertThrows(
+      () => {
+        process.cpuUsage({ user: 2, system: invalidNumber });
+      },
+      RangeError,
+    );
+  }
+});
+
+Deno.test("importedCpuUsage", () => {
+  assert(importedCpuUsage === process.cpuUsage);
 });
 
 Deno.test("process.stdout.columns writable", () => {
@@ -1157,4 +1323,185 @@ Deno.test("getBuiltinModule", () => {
   assert(process.getBuiltinModule("fs"));
   assert(process.getBuiltinModule("node:fs"));
   assertEquals(process.getBuiltinModule("something"), undefined);
+});
+
+Deno.test("process.emitWarning() prints to stderr", async () => {
+  using writeStub = stub(process.stderr, "write", () => true);
+  const { promise, resolve } = Promise.withResolvers<void>();
+  process.on("warning", () => resolve());
+
+  process.emitWarning("This is a warning", {
+    code: "TEST0001",
+    detail: "This is some additional information",
+  });
+
+  await promise;
+
+  const arg = writeStub.calls[0].args[0];
+  assert(typeof arg === "string");
+  assertMatch(
+    arg,
+    /\(node:\d+\) \[TEST0001\] Warning: This is a warning\nThis is some additional information\n/,
+  );
+});
+
+Deno.test("process.emitWarning() does not print to stderr when it is deprecation warning and noDeprecation is set to true", async () => {
+  using writeStub = stub(process.stderr, "write", () => true);
+
+  // deno-lint-ignore no-explicit-any
+  (process as any).noDeprecation = true; // Set noDeprecation to true
+  process.emitWarning("This is a deprecation warning", {
+    code: "TEST0002",
+    detail: "This is some additional information",
+    type: "DeprecationWarning",
+  });
+
+  await delay(10);
+
+  assertEquals(writeStub.calls.length, 0);
+  // deno-lint-ignore no-explicit-any
+  (process as any).noDeprecation = false; // Reset noDeprecation
+});
+
+Deno.test("process.moduleLoadList", () => {
+  // deno-lint-ignore no-explicit-any
+  const moduleLoadList = (process as any).moduleLoadList;
+  assert(Array.isArray(moduleLoadList));
+  assertEquals(moduleLoadList.length, 0);
+});
+
+Deno.test({
+  name: "process.setegid()",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    const originalEgid = getegid!();
+    const groupName = getGroupNameFromSystem(originalEgid);
+
+    // only assert that it doesn't throw
+    setegid!(originalEgid);
+    setegid!(groupName);
+  },
+});
+
+Deno.test({
+  name: "process.setegid() throws on invalid group",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    assertThrows(
+      () => {
+        setegid!("67?!");
+      },
+      "Group identifier does not exist: 67?!",
+    );
+  },
+});
+
+Deno.test({
+  name: "process.setegid() should be undefined on unsupported platforms",
+  ignore: Deno.build.os !== "windows" && Deno.build.os !== "android",
+  fn() {
+    assertEquals(process.setegid, undefined);
+  },
+});
+
+Deno.test({
+  name: "process.seteuid()",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    const originalEuid = geteuid!();
+    const userName = getUserNameFromSystem(originalEuid);
+
+    // calling with original euid to ensure it doesn't throw
+    seteuid!(originalEuid);
+    seteuid!(userName);
+  },
+});
+
+Deno.test({
+  name: "process.seteuid() throws on invalid user",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    assertThrows(
+      () => {
+        seteuid!("67?!");
+      },
+      "User identifier does not exist: 67?!",
+    );
+  },
+});
+
+Deno.test({
+  name: "process.seteuid() should be undefined on unsupported platforms",
+  ignore: Deno.build.os !== "windows" && Deno.build.os !== "android",
+  fn() {
+    assertEquals(process.seteuid, undefined);
+  },
+});
+
+Deno.test({
+  name: "process.setgid()",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    const originalGid = getgid!();
+    const groupName = getGroupNameFromSystem(originalGid);
+
+    // Calling with original gid to ensure it doesn't throw
+    setgid!(originalGid);
+    setgid!(groupName);
+  },
+});
+
+Deno.test({
+  name: "process.setgid() throws on invalid group",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    assertThrows(
+      () => {
+        setgid!("67?!");
+      },
+      "Group identifier does not exist: 67?!",
+    );
+  },
+});
+
+Deno.test({
+  name: "process.setgid() should be undefined on unsupported platforms",
+  ignore: Deno.build.os !== "windows" && Deno.build.os !== "android",
+  fn() {
+    assertEquals(process.setgid, undefined);
+  },
+});
+
+Deno.test({
+  name: "process.setuid()",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    const originalUid = getuid!();
+    const userName = getUserNameFromSystem(originalUid);
+
+    // Calling with original uid to ensure it doesn't throw
+    setuid!(originalUid);
+    setuid!(userName);
+  },
+});
+
+Deno.test({
+  name: "process.setuid() throws on invalid user",
+  ignore: Deno.build.os === "windows" || Deno.build.os === "android",
+  fn() {
+    assertThrows(
+      () => {
+        setuid!("67?!");
+      },
+      "User identifier does not exist: 67?!",
+    );
+  },
+});
+
+Deno.test({
+  name: "process.setuid() should be undefined on unsupported platforms",
+  ignore: Deno.build.os !== "windows" && Deno.build.os !== "android",
+  fn() {
+    assertEquals(process.setuid, undefined);
+  },
 });

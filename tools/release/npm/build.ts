@@ -48,8 +48,8 @@ const packages: Package[] = [{
 
 const markdownText = `# Deno
 
-[Deno](https://www.deno.com)
-([/ˈdiːnoʊ/](http://ipa-reader.xyz/?text=%CB%88di%CB%90no%CA%8A), pronounced
+[Deno](https://deno.com)
+([/ˈdiːnoʊ/](https://ipa-reader.com/?text=%CB%88di%CB%90no%CA%8A), pronounced
 \`dee-no\`) is a JavaScript, TypeScript, and WebAssembly runtime with secure
 defaults and a great developer experience. It's built on [V8](https://v8.dev/),
 [Rust](https://www.rust-lang.org/), and [Tokio](https://tokio.rs/).
@@ -58,7 +58,7 @@ Learn more about the Deno runtime
 [in the documentation](https://docs.deno.com/runtime/manual).
 `;
 
-const currentDir = $.path(import.meta.url).parentOrThrow();
+const currentDir = $.path(import.meta.dirname!);
 const rootDir = currentDir.parentOrThrow().parentOrThrow().parentOrThrow();
 const outputDir = currentDir.join("./dist");
 const scopeDir = outputDir.join("@deno");

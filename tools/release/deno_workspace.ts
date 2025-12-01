@@ -6,8 +6,8 @@ export class DenoWorkspace {
   #repo: Repo;
 
   static get rootDirPath() {
-    const currentDirPath = $.path.dirname($.path.fromFileUrl(import.meta.url));
-    return $.path.resolve(currentDirPath, "../../");
+    const currentDirPath = $.path(import.meta.dirname!);
+    return currentDirPath.parentOrThrow().parentOrThrow();
   }
 
   static async load(): Promise<DenoWorkspace> {
@@ -42,13 +42,21 @@ export class DenoWorkspace {
     return this.getCrate("deno");
   }
 
+  getDenoRtCrate() {
+    return this.getCrate("denort");
+  }
+
+  getDenoLibCrate() {
+    return this.getCrate("deno_lib");
+  }
+
   getCrate(name: string) {
     return this.#repo.getCrate(name);
   }
 
   getReleasesMdFile() {
     return new ReleasesMdFile(
-      $.path.join(DenoWorkspace.rootDirPath, "Releases.md"),
+      DenoWorkspace.rootDirPath.join("Releases.md").toString(),
     );
   }
 

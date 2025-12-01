@@ -9,13 +9,12 @@ use deno_core::error::AnyError;
 use deno_core::parking_lot::Mutex;
 use deno_core::parking_lot::MutexGuard;
 use deno_core::unsync::spawn_blocking;
+use deno_lib::util::hash::FastInsecureHasher;
 use deno_runtime::deno_webstorage::rusqlite;
 use deno_runtime::deno_webstorage::rusqlite::Connection;
 use deno_runtime::deno_webstorage::rusqlite::OptionalExtension;
 use deno_runtime::deno_webstorage::rusqlite::Params;
 use once_cell::sync::OnceCell;
-
-use super::FastInsecureHasher;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct CacheDBHash(u64);
@@ -33,6 +32,10 @@ impl CacheDBHash {
         .write_hashable(hashable)
         .finish(),
     )
+  }
+
+  pub fn inner(&self) -> u64 {
+    self.0
   }
 }
 
@@ -233,7 +236,7 @@ impl CacheDB {
     config: &CacheDBConfiguration,
     conn: &Connection,
     version: &str,
-  ) -> Result<(), AnyError> {
+  ) -> Result<(), rusqlite::Error> {
     let sql = config.create_combined_sql();
     conn.execute_batch(&sql)?;
 
@@ -266,7 +269,7 @@ impl CacheDB {
   fn open_connection_and_init(
     &self,
     path: Option<&Path>,
-  ) -> Result<Connection, AnyError> {
+  ) -> Result<Connection, rusqlite::Error> {
     let conn = self.actually_open_connection(path)?;
     Self::initialize_connection(self.config, &conn, self.version)?;
     Ok(conn)
@@ -369,7 +372,9 @@ impl CacheDB {
 fn open_connection(
   config: &CacheDBConfiguration,
   path: Option<&Path>,
-  open_connection_and_init: impl Fn(Option<&Path>) -> Result<Connection, AnyError>,
+  open_connection_and_init: impl Fn(
+    Option<&Path>,
+  ) -> Result<Connection, rusqlite::Error>,
 ) -> Result<ConnectionState, AnyError> {
   // Success on first try? We hope that this is the case.
   let err = match open_connection_and_init(path) {
@@ -380,8 +385,19 @@ fn open_connection(
   let Some(path) = path.as_ref() else {
     // If an in-memory DB fails, that's game over
     log::error!("Failed to initialize in-memory cache database.");
-    return Err(err);
+    return Err(err.into());
   };
+
+  // reduce logging for readonly file system
+  if let rusqlite::Error::SqliteFailure(ffi_err, _) = &err
+    && ffi_err.code == rusqlite::ErrorCode::ReadOnly
+  {
+    log::debug!(
+      "Failed creating cache db. Folder readonly: {}",
+      path.display()
+    );
+    return handle_failure_mode(config, err, open_connection_and_init);
+  }
 
   // ensure the parent directory exists
   if let Some(parent) = path.parent() {
@@ -411,10 +427,15 @@ fn open_connection(
   // Failed, try deleting it
   let is_tty = std::io::stderr().is_terminal();
   log::log!(
-      if is_tty { log::Level::Warn } else { log::Level::Trace },
-      "Could not initialize cache database '{}', deleting and retrying... ({err:?})",
-      path.to_string_lossy()
-    );
+    if is_tty {
+      log::Level::Warn
+    } else {
+      log::Level::Trace
+    },
+    "Could not initialize cache database '{}', deleting and retrying... ({err:?})",
+    path.to_string_lossy()
+  );
+
   if std::fs::remove_file(path).is_ok() {
     // Try a third time if we successfully deleted it
     let res = open_connection_and_init(Some(path));
@@ -423,6 +444,11 @@ fn open_connection(
     };
   }
 
+  log_failure_mode(path, is_tty, config);
+  handle_failure_mode(config, err, open_connection_and_init)
+}
+
+fn log_failure_mode(path: &Path, is_tty: bool, config: &CacheDBConfiguration) {
   match config.on_failure {
     CacheFailure::InMemory => {
       log::log!(
@@ -432,9 +458,8 @@ fn open_connection(
           log::Level::Trace
         },
         "Failed to open cache file '{}', opening in-memory cache.",
-        path.to_string_lossy()
+        path.display()
       );
-      Ok(ConnectionState::Connected(open_connection_and_init(None)?))
     }
     CacheFailure::Blackhole => {
       log::log!(
@@ -444,23 +469,36 @@ fn open_connection(
           log::Level::Trace
         },
         "Failed to open cache file '{}', performance may be degraded.",
-        path.to_string_lossy()
+        path.display()
       );
-      Ok(ConnectionState::Blackhole)
     }
     CacheFailure::Error => {
       log::error!(
         "Failed to open cache file '{}', expect further errors.",
-        path.to_string_lossy()
+        path.display()
       );
-      Err(err)
     }
+  }
+}
+
+fn handle_failure_mode(
+  config: &CacheDBConfiguration,
+  err: rusqlite::Error,
+  open_connection_and_init: impl Fn(
+    Option<&Path>,
+  ) -> Result<Connection, rusqlite::Error>,
+) -> Result<ConnectionState, AnyError> {
+  match config.on_failure {
+    CacheFailure::InMemory => {
+      Ok(ConnectionState::Connected(open_connection_and_init(None)?))
+    }
+    CacheFailure::Blackhole => Ok(ConnectionState::Blackhole),
+    CacheFailure::Error => Err(err.into()),
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use deno_core::anyhow::anyhow;
   use test_util::TempDir;
 
   use super::*;
@@ -521,7 +559,8 @@ mod tests {
     let path = temp_dir.path().join("data").to_path_buf();
     let state = open_connection(&TEST_DB, Some(path.as_path()), |maybe_path| {
       match maybe_path {
-        Some(_) => Err(anyhow!("fail")),
+        // this error was chosen because it was an error easy to construct
+        Some(_) => Err(rusqlite::Error::SqliteSingleThreadedMode),
         None => Ok(Connection::open_in_memory().unwrap()),
       }
     })
@@ -570,9 +609,9 @@ mod tests {
   }
 
   fn assert_same_serialize_deserialize(original_hash: CacheDBHash) {
+    use rusqlite::ToSql;
     use rusqlite::types::FromSql;
     use rusqlite::types::ValueRef;
-    use rusqlite::ToSql;
 
     let value = original_hash.to_sql().unwrap();
     match value {

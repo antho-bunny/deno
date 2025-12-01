@@ -547,3 +547,176 @@ Deno.test(function readableStreamFromWithStringThrows() {
     "Failed to execute 'ReadableStream.from': Argument 1 can not be converted to async iterable.",
   );
 });
+
+Deno.test(async function readableStreamFromWithStringThrows() {
+  const serverPort = 4592;
+  const upstreamServerPort = 4593;
+
+  const stopSignal = new AbortController();
+  const promise = Promise.withResolvers();
+  // Response transforming server that crashes with an uncaught AbortError.
+  function startServer() {
+    Deno.serve({ port: serverPort, signal: stopSignal.signal }, async (req) => {
+      const upstreamResponse = await fetch(
+        `http://localhost:${upstreamServerPort}`,
+        req,
+      );
+
+      // Use a TransformStream to convert the response body to uppercase.
+      const transformStream = new TransformStream({
+        transform(chunk, controller) {
+          const decoder = new TextDecoder();
+          const encoder = new TextEncoder();
+          const chunk2 = encoder.encode(decoder.decode(chunk).toUpperCase());
+          controller.enqueue(chunk2);
+        },
+      });
+
+      upstreamResponse.body?.pipeTo(transformStream.writable).catch(() => {});
+
+      return new Response(transformStream.readable);
+    });
+  }
+
+  // ==== THE ISSUE IS NOT IN THE CODE BELOW ====
+
+  // Upstream server that sends a response with a body that never ends.
+  // This is not where the error happens (it handlers the cancellation correctly).
+  function startUpstreamServer() {
+    Deno.serve({ port: upstreamServerPort, signal: stopSignal.signal }, (_) => {
+      // Create an infinite readable stream that emits 'a'
+      let pushTimeout: number | null = null;
+      const readableStream = new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          const chunk = encoder.encode("a");
+
+          function push() {
+            controller.enqueue(chunk);
+            pushTimeout = setTimeout(push, 100);
+          }
+
+          push();
+        },
+
+        cancel(reason) {
+          assertEquals(reason, "resource closed");
+          promise.resolve(undefined);
+          clearTimeout(pushTimeout!);
+        },
+      });
+
+      return new Response(readableStream, {
+        headers: { "Content-Type": "text/plain" },
+      });
+    });
+  }
+
+  // The client is just there to simulate a client that cancels a request.
+  async function startClient() {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    try {
+      const response = await fetch(`http://localhost:${serverPort}`, {
+        signal,
+      });
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("client: failed to get reader from response");
+      }
+
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        received += value.length;
+
+        if (received >= 5) {
+          controller.abort();
+          break;
+        }
+      }
+    } catch (_) {
+      //
+    }
+  }
+
+  startUpstreamServer();
+  startServer();
+  const p = startClient();
+
+  await promise.promise;
+  stopSignal.abort();
+  await p;
+});
+
+Deno.test(async function readableStreamEmittingManyChunks() {
+  const code = `
+    const serverPort = 4594;
+    const stopSignal = new AbortController();
+    let count = 0;
+    let before = 0;
+    let after = 0;
+
+    function startServer() {
+      Deno.serve({ port: serverPort, signal: stopSignal.signal }, (_) => {
+        return new Response(
+          new ReadableStream({
+            start() {
+              before = Deno.memoryUsage().heapUsed;
+            },
+            pull(controller) {
+              const used = Deno.memoryUsage().heapUsed;
+
+              if (used > after) {
+                after = used;
+              }
+
+              if (count < 30_000) {
+                controller.enqueue(new Uint8Array([0]));
+              } else {
+                controller.close();
+              }
+
+              count += 1;
+            },
+          }),
+        );
+      });
+    }
+
+    async function startClient() {
+      const response = await fetch(\`http://localhost:\${serverPort}\`);
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("client: failed to get reader from response");
+      }
+
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    }
+
+    startServer();
+    await startClient();
+    stopSignal.abort();
+    console.log(\`\${after} / \${before} = \${after / before}\`);
+    if (after / before > 1.5) {
+      Deno.exit(1);
+    }
+  `;
+  const command = new Deno.Command(Deno.execPath(), {
+    args: ["run", "-N", "-"],
+    stdin: "piped",
+  });
+
+  await using child = command.spawn();
+  await ReadableStream.from([code])
+    .pipeThrough(new TextEncoderStream())
+    .pipeTo(child.stdin);
+
+  assertEquals((await child.status).code, 0, "memory leak");
+});

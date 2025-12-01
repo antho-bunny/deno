@@ -6,7 +6,7 @@
 /// <reference path="../../core/internal.d.ts" />
 /// <reference path="../webidl/internal.d.ts" />
 /// <reference path="../web/internal.d.ts" />
-/// <reference path="../web/lib.deno_web.d.ts" />
+/// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 /// <reference path="./internal.d.ts" />
 /// <reference lib="esnext" />
 
@@ -58,8 +58,8 @@ const {
 
 import * as webidl from "ext:deno_webidl/00_webidl.js";
 import { ReadableStream } from "./06_streams.js";
-import { URL } from "ext:deno_url/00_url.js";
-import { createFilteredInspectProxy } from "ext:deno_console/01_console.js";
+import { URL } from "ext:deno_web/00_url.js";
+import { createFilteredInspectProxy } from "./01_console.js";
 
 // TODO(lucacasonato): this needs to not be hardcoded and instead depend on
 // host os.
@@ -718,6 +718,10 @@ function revokeObjectURL(url) {
 URL.createObjectURL = createObjectURL;
 URL.revokeObjectURL = revokeObjectURL;
 
+function isBlob(obj) {
+  return ObjectPrototypeIsPrototypeOf(BlobPrototype, obj);
+}
+
 export {
   Blob,
   blobFromObjectUrl,
@@ -725,4 +729,5 @@ export {
   File,
   FilePrototype,
   getParts,
+  isBlob,
 };

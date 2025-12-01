@@ -1,13 +1,13 @@
 // Copyright 2018-2025 the Deno authors. MIT license.
 
-use deno_core::serde_json::json;
+use serde_json::json;
 use test_util as util;
 use test_util::itest;
-use util::assert_contains;
-use util::assert_not_contains;
 use util::PathRef;
 use util::TestContext;
 use util::TestContextBuilder;
+use util::assert_contains;
+use util::assert_not_contains;
 
 #[test]
 fn fmt_test() {
@@ -188,19 +188,6 @@ fn fmt_stdin_syntax_error() {
 }
 
 #[test]
-fn fmt_ignore_unexplicit_files() {
-  let context = TestContext::default();
-  let output = context
-    .new_command()
-    .env("NO_COLOR", "1")
-    .args("fmt --check --ignore=./")
-    .run();
-
-  output.assert_exit_code(1);
-  assert_eq!(output.combined_output(), "error: No target files found.\n");
-}
-
-#[test]
 fn fmt_auto_ignore_git_and_node_modules() {
   fn create_bad_json(t: PathRef) {
     let bad_json_path = t.join("bad.json");
@@ -227,7 +214,7 @@ fn fmt_auto_ignore_git_and_node_modules() {
     .new_command()
     .current_dir(t)
     .env("NO_COLOR", "1")
-    .args("fmt")
+    .args("fmt .")
     .run();
 
   output.assert_exit_code(1);
@@ -252,18 +239,6 @@ itest!(fmt_check_ignore {
   exit_code: 0,
 });
 
-itest!(fmt_check_parse_error {
-  args: "fmt --check fmt/parse_error/parse_error.ts",
-  output: "fmt/fmt_check_parse_error.out",
-  exit_code: 1,
-});
-
-itest!(fmt_check_invalid_data {
-  args: "fmt --check fmt/invalid_data.json",
-  output: "fmt/invalid_data.out",
-  exit_code: 1,
-});
-
 itest!(fmt_stdin {
   args: "fmt -",
   input: Some("const a = 1\n"),
@@ -272,8 +247,12 @@ itest!(fmt_stdin {
 
 itest!(fmt_stdin_markdown {
   args: "fmt --ext=md -",
-  input: Some("# Hello      Markdown\n```ts\nconsole.log( \"text\")\n```\n\n```cts\nconsole.log( 5 )\n```"),
-  output_str: Some("# Hello Markdown\n\n```ts\nconsole.log(\"text\");\n```\n\n```cts\nconsole.log(5);\n```\n"),
+  input: Some(
+    "# Hello      Markdown\n```ts\nconsole.log( \"text\")\n```\n\n```cts\nconsole.log( 5 )\n```"
+  ),
+  output_str: Some(
+    "# Hello Markdown\n\n```ts\nconsole.log(\"text\");\n```\n\n```cts\nconsole.log(5);\n```\n"
+  ),
 });
 
 itest!(fmt_stdin_json {
@@ -441,4 +420,22 @@ fn opt_out_top_level_exclude_via_fmt_unexclude() {
   assert_contains!(output, "main.ts");
   assert_contains!(output, "excluded.ts");
   assert_not_contains!(output, "actually_excluded.ts");
+}
+
+#[flaky_test::flaky_test]
+fn test_tty_non_workspace_directory() {
+  let context = TestContextBuilder::new().use_temp_cwd().build();
+  let temp_dir = context.temp_dir().path();
+  temp_dir.join("main.ts").write("const a = 1;\n");
+  context.new_command().arg("fmt").with_pty(|mut pty| {
+    pty.expect("Are you sure you want to format the entire");
+    pty.write_raw("y\r\n");
+    pty.expect("Checked 1 file");
+  });
+
+  context.new_command().arg("fmt").with_pty(|mut pty| {
+    pty.expect("Are you sure you want to format");
+    pty.write_raw("n\r\n");
+    pty.expect("Did not format non-workspace directory");
+  });
 }

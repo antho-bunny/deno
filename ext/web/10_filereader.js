@@ -6,7 +6,7 @@
 /// <reference path="../../core/internal.d.ts" />
 /// <reference path="../webidl/internal.d.ts" />
 /// <reference path="../web/internal.d.ts" />
-/// <reference path="../web/lib.deno_web.d.ts" />
+/// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 /// <reference path="./internal.d.ts" />
 /// <reference lib="esnext" />
 
@@ -34,7 +34,7 @@ const {
 } = primordials;
 
 import * as webidl from "ext:deno_webidl/00_webidl.js";
-import { createFilteredInspectProxy } from "ext:deno_console/01_console.js";
+import { createFilteredInspectProxy } from "./01_console.js";
 import { forgivingBase64Encode } from "./00_infra.js";
 import { EventTarget, ProgressEvent } from "./02_event.js";
 import { decode, TextDecoder } from "./08_text_encoding.js";

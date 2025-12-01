@@ -1,29 +1,38 @@
 // Copyright 2018-2025 the Deno authors. MIT license.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV6;
 use std::path::PathBuf;
 
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytes::Bytes;
-use futures::future::LocalBoxFuture;
-use futures::Future;
 use futures::FutureExt;
+use futures::future::LocalBoxFuture;
+use http::HeaderMap;
+use http::HeaderValue;
+use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
-use hyper::body::Incoming;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
+use hyper::body::Incoming;
+use serde_json::json;
+use sha2::Digest;
 
+use super::ServerKind;
+use super::ServerOptions;
 use super::custom_headers;
 use super::empty_body;
 use super::hyper_utils::HandlerOutput;
 use super::run_server;
 use super::string_body;
-use super::ServerKind;
-use super::ServerOptions;
 use crate::npm;
+use crate::root_path;
 
 pub fn public_npm_registry(port: u16) -> Vec<LocalBoxFuture<'static, ()>> {
   run_npm_server(port, "npm registry server error", {
@@ -69,7 +78,7 @@ fn run_npm_server<F, S>(
   port: u16,
   error_msg: &'static str,
   handler: F,
-) -> Vec<LocalBoxFuture<()>>
+) -> Vec<LocalBoxFuture<'static, ()>>
 where
   F: Fn(Request<hyper::body::Incoming>) -> S + Copy + 'static,
   S: Future<Output = HandlerOutput> + 'static,
@@ -95,6 +104,7 @@ async fn run_npm_server_for_addr<F, S>(
   F: Fn(Request<hyper::body::Incoming>) -> S + Copy + 'static,
   S: Future<Output = HandlerOutput> + 'static,
 {
+  ensure_esbuild_prebuilt().await.unwrap();
   run_server(
     ServerOptions {
       addr,
@@ -165,6 +175,11 @@ async fn handle_req_for_registry(
 
   // serve the registry package files
   let uri_path = req.uri().path();
+
+  if uri_path == "/-/npm/v1/security/audits" {
+    return npm_security_audits(req).await;
+  }
+
   let mut file_path = root_dir.to_path_buf();
   file_path.push(uri_path[1..].replace("%2f", "/").replace("%2F", "/"));
 
@@ -175,8 +190,13 @@ async fn handle_req_for_registry(
   }
 
   // otherwise try to serve from the registry
-  if let Some(resp) =
-    try_serve_npm_registry(uri_path, file_path.clone(), test_npm_registry).await
+  if let Some(resp) = try_serve_npm_registry(
+    uri_path,
+    file_path.clone(),
+    req.headers(),
+    test_npm_registry,
+  )
+  .await
   {
     return resp;
   }
@@ -190,6 +210,7 @@ async fn handle_req_for_registry(
 fn handle_custom_npm_registry_path(
   scope_name: &str,
   path: &str,
+  headers: &HeaderMap<HeaderValue>,
   test_npm_registry: &npm::TestNpmRegistry,
 ) -> Result<Option<Response<UnsyncBoxBody<Bytes, Infallible>>>, anyhow::Error> {
   let mut parts = path
@@ -207,13 +228,31 @@ fn handle_custom_npm_registry_path(
       let file_resp = custom_headers("file.tgz", file_bytes);
       return Ok(Some(file_resp));
     }
-  } else if remainder.is_empty() {
-    if let Some(registry_file) =
+  } else if remainder.is_empty()
+    && let Some(registry_file) =
       test_npm_registry.registry_file(&package_name)?
+  {
+    let actual_etag = format!(
+      "\"{}\"",
+      BASE64_STANDARD.encode(sha2::Sha256::digest(&registry_file))
+    );
+    if headers.get("If-None-Match").and_then(|v| v.to_str().ok())
+      == Some(actual_etag.as_str())
     {
-      let file_resp = custom_headers("registry.json", registry_file);
-      return Ok(Some(file_resp));
+      let mut response = Response::new(UnsyncBoxBody::new(
+        http_body_util::Full::new(Bytes::from(vec![])),
+      ));
+      *response.status_mut() = StatusCode::NOT_MODIFIED;
+      return Ok(Some(response));
     }
+
+    let mut file_resp = custom_headers("registry.json", registry_file);
+    file_resp.headers_mut().append(
+      http::header::ETAG,
+      http::header::HeaderValue::from_str(&actual_etag).unwrap(),
+    );
+
+    return Ok(Some(file_resp));
   }
 
   Ok(None)
@@ -228,6 +267,7 @@ fn should_download_npm_packages() -> bool {
 async fn try_serve_npm_registry(
   uri_path: &str,
   mut testdata_file_path: PathBuf,
+  headers: &HeaderMap<HeaderValue>,
   test_npm_registry: &npm::TestNpmRegistry,
 ) -> Option<Result<Response<UnsyncBoxBody<Bytes, Infallible>>, anyhow::Error>> {
   if let Some((scope_name, package_name_with_path)) = test_npm_registry
@@ -238,6 +278,7 @@ async fn try_serve_npm_registry(
     match handle_custom_npm_registry_path(
       scope_name,
       package_name_with_path,
+      headers,
       test_npm_registry,
     ) {
       Ok(Some(response)) => return Some(Ok(response)),
@@ -301,9 +342,12 @@ fn replace_default_npm_registry_url_with_test_npm_registry_url(
   npm_registry: &npm::TestNpmRegistry,
   package_name: &str,
 ) -> String {
+  let package_name = percent_encoding::percent_decode_str(package_name)
+    .decode_utf8()
+    .unwrap();
   text.replace(
     &format!("https://registry.npmjs.org/{}/-/", package_name),
-    &npm_registry.package_url(package_name),
+    &npm_registry.package_url(&package_name),
   )
 }
 
@@ -342,4 +386,190 @@ async fn download_npm_registry_file(
   std::fs::create_dir_all(testdata_file_path.parent().unwrap())?;
   std::fs::write(testdata_file_path, bytes)?;
   Ok(())
+}
+
+const PREBUILT_URL: &str = "https://raw.githubusercontent.com/denoland/deno_third_party/de0d517e6f703fb4735b7aa5806f69fbdbb1d907/prebuilt/";
+
+async fn ensure_esbuild_prebuilt() -> Result<(), anyhow::Error> {
+  let bin_name = match (std::env::consts::ARCH, std::env::consts::OS) {
+    ("x86_64", "linux" | "macos" | "apple") => "esbuild-x64",
+    ("aarch64", "linux" | "macos" | "apple") => "esbuild-aarch64",
+    ("x86_64", "windows") => "esbuild-x64.exe",
+    ("aarch64", "windows") => "esbuild-arm64.exe",
+    _ => return Err(anyhow::anyhow!("unsupported platform")),
+  };
+
+  let folder = match std::env::consts::OS {
+    "linux" => "linux64",
+    "windows" => "win",
+    "macos" | "apple" => "mac",
+    _ => return Err(anyhow::anyhow!("unsupported platform")),
+  };
+  let esbuild_prebuilt = root_path()
+    .join("third_party/prebuilt")
+    .join(folder)
+    .join(bin_name);
+  if esbuild_prebuilt.exists() {
+    return Ok(());
+  }
+  let url = format!("{PREBUILT_URL}{folder}/{bin_name}");
+  let response = reqwest::get(url).await?;
+  let bytes = response.bytes().await?;
+
+  tokio::fs::create_dir_all(esbuild_prebuilt.parent()).await?;
+  tokio::fs::write(&esbuild_prebuilt, bytes).await?;
+
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = tokio::fs::metadata(&esbuild_prebuilt).await?.permissions();
+    perms.set_mode(0o755); // rwxr-xr-x
+    tokio::fs::set_permissions(&esbuild_prebuilt, perms).await?;
+  }
+
+  Ok(())
+}
+
+async fn npm_security_audits(
+  req: Request<Incoming>,
+) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, anyhow::Error> {
+  let body = req.into_body().collect().await?.to_bytes();
+  let json_obj: serde_json::Value = serde_json::from_slice(&body)?;
+
+  let Some(resp_body) = process_npm_security_audits_body(json_obj) else {
+    return Response::builder()
+      .status(StatusCode::BAD_REQUEST)
+      .body(empty_body())
+      .map_err(|e| e.into());
+  };
+
+  Response::builder()
+    .body(string_body(&serde_json::to_string(&resp_body).unwrap()))
+    .map_err(|e| e.into())
+}
+
+fn process_npm_security_audits_body(
+  value: serde_json::Value,
+) -> Option<serde_json::Value> {
+  let dependency_count = 0;
+  let dev_dependency_count = 0;
+  let optional_dependency_count = 0;
+  let mut actions = vec![];
+  let mut advisories = HashMap::new();
+  let vuln_info = 0;
+  let vuln_low = 0;
+  let vuln_moderate = 0;
+  let mut vuln_high = 0;
+  let mut vuln_critical = 0;
+
+  let requires_map = value.get("requires")?.as_object()?;
+  let requires_map_keys = requires_map.keys().cloned().collect::<Vec<_>>();
+  if requires_map_keys.contains(&"@denotest/with-vuln1".to_string()) {
+    actions.push(get_action_for_with_vuln1());
+    advisories.insert(101010, get_advisory_for_with_vuln1());
+    vuln_high += 1;
+  }
+  if requires_map_keys.contains(&"@denotest/using-vuln".to_string()) {
+    actions.extend_from_slice(&get_actions_for_with_vuln2());
+    advisories.insert(202020, get_advisory_for_with_vuln2());
+    vuln_critical += 1;
+  }
+
+  Some(json!({
+    "actions": actions,
+    "advisories": advisories,
+    "muted": [],
+    "metadata": {
+      "vulnerabilities": {
+        "info": vuln_info,
+        "low": vuln_low,
+        "moderate": vuln_moderate,
+        "high": vuln_high,
+        "critical":vuln_critical,
+      },
+      "dependencies": dependency_count,
+      "devDependencies": dev_dependency_count,
+      "optionalDependencies": optional_dependency_count,
+      "totalDependencies": dependency_count + dev_dependency_count + optional_dependency_count
+    }
+  }))
+}
+
+fn get_action_for_with_vuln1() -> serde_json::Value {
+  json!({
+    "isMajor": false,
+    "action": "install",
+    "resolves": [{
+      "id": 101010,
+      "path": "@denotest/with-vuln1",
+      "dev": false,
+      "optional": false,
+      "bundled": false,
+    }],
+    "module": "@denotest/with-vuln1",
+    "target": "1.1.0"
+  })
+}
+
+fn get_advisory_for_with_vuln1() -> serde_json::Value {
+  json!({
+    "findings": [
+      {"version": "1.0.0", "paths": ["@denotest/with-vuln1"]}
+    ],
+    "id": 101010,
+    "overview": "Lorem ipsum dolor sit amet",
+    "title": "@denotest/with-vuln1 is susceptible to prototype pollution",
+    "severity": "high",
+    "module_name": "@edenotest/with-vuln1",
+    "vulnerable_versions": "<1.1.0",
+    "recommendations": "Upgrade to version 1.1.0 or later",
+    "patched_versions": ">=1.1.0",
+    "url": "https://example.com/vuln/101010"
+  })
+}
+
+fn get_actions_for_with_vuln2() -> Vec<serde_json::Value> {
+  vec![
+    json!({
+      "isMajor": true,
+      "action": "install",
+      "resolves": [{
+        "id": 202020,
+        "path": "@denotest/using-vuln>@denotest/with-vuln2",
+        "dev": false,
+        "optional": false,
+        "bundled": false,
+      }],
+      "module": "@denotest/with-vuln2",
+      "target": "2.0.0"
+    }),
+    json!({
+      "action": "review",
+      "resolves": [{
+        "id": 202020,
+        "path": "@denotest/using-vuln>@denotest/with-vuln2",
+        "dev": false,
+        "optional": false,
+        "bundled": false,
+      }],
+      "module": "@denotest/with-vuln2"
+    }),
+  ]
+}
+
+fn get_advisory_for_with_vuln2() -> serde_json::Value {
+  json!({
+    "findings": [
+      {"version": "1.5.0", "paths": ["@denotest/using-vuln>@denotest/with-vuln2"]}
+    ],
+    "id": 202020,
+    "overview": "Lorem ipsum dolor sit amet",
+    "title": "@denotest/with-vuln2 can steal crypto keys",
+    "severity": "critical",
+    "module_name": "@edenotest/with-vuln2",
+    "vulnerable_versions": "<2.0.0",
+    "recommendations": "Upgrade to version 2.0.0 or later",
+    "patched_versions": ">=2.0.0",
+    "url": "https://example.com/vuln/202020"
+  })
 }

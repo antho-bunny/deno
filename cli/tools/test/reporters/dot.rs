@@ -41,7 +41,7 @@ impl DotTestReporter {
       return;
     }
 
-    if self.n != 0 && self.n % self.width == 0 {
+    if self.n != 0 && self.n.is_multiple_of(self.width) {
       println!();
     }
     self.n += 1;
@@ -97,7 +97,7 @@ impl TestReporter for DotTestReporter {
 
   fn report_wait(&mut self, _description: &TestDescription) {
     // flush for faster feedback when line buffered
-    std::io::stdout().flush().unwrap();
+    std::io::stdout().flush().ok();
   }
 
   fn report_slow(&mut self, _description: &TestDescription, _elapsed: u64) {}
@@ -149,7 +149,7 @@ impl TestReporter for DotTestReporter {
 
   fn report_step_wait(&mut self, _description: &TestStepDescription) {
     // flush for faster feedback when line buffered
-    std::io::stdout().flush().unwrap();
+    std::io::stdout().flush().ok();
   }
 
   fn report_step_result(
